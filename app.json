@@ -1,0 +1,29 @@
+{
+  "expo": {
+    "name": "BEATUS Mobile",
+    "slug": "beatus-mobile",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "light",
+    "scheme": "beatus",
+    "plugins": ["expo-notifications"],
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.beatus.mobile",
+      "infoPlist": {
+        "NSLocationWhenInUseUsageDescription": "BEATUS utilise votre position pour localiser les interventions sur la carte.",
+        "NSPhotoLibraryUsageDescription": "BEATUS accède à vos photos pour ajouter des logos et documents."
+      }
+    },
+    "android": {
+      "package": "com.beatus.mobile",
+      "adaptiveIcon": {
+        "backgroundColor": "#ffffff"
+      },
+      "permissions": ["RECEIVE_BOOT_COMPLETED", "VIBRATE"]
+    },
+    "extra": {
+      "apiBaseUrl": "https://beatus-backend.deno.dev/api"
+    }
+  }
+}
