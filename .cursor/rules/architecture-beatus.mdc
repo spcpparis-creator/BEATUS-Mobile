@@ -1,0 +1,40 @@
+---
+description: Architecture BEATUS - distinction Admin web vs App mobile TL/Techniciens
+alwaysApply: true
+---
+
+# Architecture BEATUS
+
+## Deux projets distincts
+
+| Projet | Chemin | Rôle | Utilisateurs |
+|--------|--------|------|--------------|
+| **BEATUS** | `/BEATUS` | Admin frontend web (PC) | Admin uniquement |
+| **BEATUS-Mobile** | `/BEATUS-Mobile` | App iOS (App Store) | Team leaders + Techniciens |
+
+## Communication
+
+Les deux projets sont **séparés** mais communiquent via le **même backend** :
+- API : `https://beatus-backend.deno.dev/api`
+- Pas de communication directe entre BEATUS et BEATUS-Mobile
+
+## Flux des interventions
+
+1. **Admin** (BEATUS web) crée une intervention
+2. **Team leader** (BEATUS-Mobile) la reçoit si son secteur correspond
+3. Le TL peut : **prendre** lui-même, **attendre** qu'un technicien prenne, ou **assigner** à un technicien
+4. **Historique** : Admin et TL voient refusées, prises, validées (admin sur web, TL sur mobile)
+
+## Builds et déploiements
+
+| Composant | Build | Déploiement |
+|-----------|-------|-------------|
+| BEATUS (web) | `npm run build` | `vercel --prod` |
+| BEATUS-Mobile | `eas build` | Build → lien install / App Store |
+| Backend | — | `deployctl deploy` (Deno) |
+
+## Quand tu réponds
+
+- **BEATUS** = admin web (PC)
+- **BEATUS-Mobile** = app iOS (TL + techniciens)
+- Toujours distinguer les deux lors des builds, déploiements et réponses

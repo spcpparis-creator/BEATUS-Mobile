@@ -77,7 +77,10 @@ export default function InviteTechnicianScreen({ navigation }: Props) {
       setCommissionPercentage(tl.defaultTechnicianCommission ?? 30);
       
       // Charger les activités
-      const acts = activitiesData?.data?.activities || activitiesData?.activities || [];
+      // getActivities() retourne directement un tableau, pas { data: { activities: [] } }
+      const acts = Array.isArray(activitiesData) 
+        ? activitiesData 
+        : (activitiesData?.data?.activities || activitiesData?.activities || []);
       setActivities(acts.filter((a: any) => a.isActive !== false));
     } catch (error) {
       console.error('Erreur chargement données:', error);
@@ -148,8 +151,8 @@ export default function InviteTechnicianScreen({ navigation }: Props) {
   const shareCode = async () => {
     if (invitationCode) {
       try {
-        const sectorInfo = selectedSector 
-          ? `\nSecteur: ${selectedSector} - ${FRENCH_DEPARTMENTS[selectedSector] || selectedSector}`
+        const sectorInfo = selectedSectors.length > 0
+          ? `\nSecteurs: ${selectedSectors.map(c => `${c} - ${FRENCH_DEPARTMENTS[c] || c}`).join(', ')}`
           : '';
         await Share.share({
           message: `Rejoignez mon équipe sur BEATUS !\n\nCode d'invitation : ${invitationCode}${sectorInfo}\n\nTéléchargez l'application et utilisez ce code pour vous inscrire.`,

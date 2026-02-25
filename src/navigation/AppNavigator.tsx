@@ -1,7 +1,7 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect } from 'react';
 import { NavigationContainer, useNavigationContainerRef } from '@react-navigation/native';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
-import { ActivityIndicator, View } from 'react-native';
+import { ActivityIndicator, View, Alert, Linking } from 'react-native';
 import * as Notifications from 'expo-notifications';
 import { useAuth } from '../contexts/AuthContext';
 import { COLORS, API_BASE_URL } from '../config/api';
@@ -11,6 +11,7 @@ import * as SecureStore from 'expo-secure-store';
 import WelcomeScreen from '../screens/WelcomeScreen';
 import ProfileCompletionScreen from '../screens/ProfileCompletionScreen';
 import TechnicianHomeScreen from '../screens/technician/TechnicianHomeScreen';
+import TechnicianSettingsScreen from '../screens/technician/TechnicianSettingsScreen';
 import InterventionDetailScreen from '../screens/technician/InterventionDetailScreen';
 import TeamLeaderHomeScreen from '../screens/teamleader/TeamLeaderHomeScreen';
 import InviteTechnicianScreen from '../screens/teamleader/InviteTechnicianScreen';
@@ -24,11 +25,14 @@ import MyDocumentsScreen from '../screens/teamleader/MyDocumentsScreen';
 import BillingSettingsScreen from '../screens/teamleader/BillingSettingsScreen';
 import QuoteDetailScreen from '../screens/billing/QuoteDetailScreen';
 import InvoiceDetailScreen from '../screens/billing/InvoiceDetailScreen';
+import SumUpSettingsScreen from '../screens/shared/SumUpSettingsScreen';
+import MessagingScreen from '../screens/shared/MessagingScreen';
 
 export type RootStackParamList = {
   Welcome: undefined;
   ProfileCompletion: undefined;
   TechnicianHome: undefined;
+  TechnicianSettings: undefined;
   InterventionDetail: { interventionId: string };
   TeamLeaderHome: undefined;
   InviteTechnician: undefined;
@@ -42,6 +46,8 @@ export type RootStackParamList = {
   InvoiceDetail: { invoiceId: string };
   MyDocuments: undefined;
   BillingSettings: undefined;
+  SumUpSettings: undefined;
+  Messaging: { conversationId?: string; interventionId?: string; interventionRef?: string } | undefined;
 };
 
 const Stack = createNativeStackNavigator<RootStackParamList>();
@@ -51,6 +57,11 @@ export default function AppNavigator() {
   const [profileComplete, setProfileComplete] = useState<boolean | null>(null);
   const [checkingProfile, setCheckingProfile] = useState(false);
   const navigationRef = useNavigationContainerRef<RootStackParamList>();
+
+  // Réinitialiser le badge à l'ouverture de l'app
+  useEffect(() => {
+    Notifications.setBadgeCountAsync(0);
+  }, []);
 
   // Écouter le tap sur une notification → navigation vers l'intervention
   useEffect(() => {
@@ -69,6 +80,52 @@ export default function AppNavigator() {
     });
 
     return () => subscription.remove();
+  }, []);
+
+  // Écouter les deep links SumUp (beatus://sumup-connected, beatus://sumup-error)
+  useEffect(() => {
+    const handleDeepLink = (event: { url: string }) => {
+      const url = event.url;
+      if (!url) return;
+
+      // beatus://sumup-connected → succès
+      if (url.includes('sumup-connected')) {
+        Alert.alert(
+          'SumUp connecté !',
+          'Votre compte SumUp a été connecté avec succès. Les devis et factures incluront désormais un lien de paiement.',
+          [
+            {
+              text: 'Voir les paramètres',
+              onPress: () => {
+                if (navigationRef.isReady()) {
+                  (navigationRef as any).navigate('SumUpSettings');
+                }
+              },
+            },
+            { text: 'OK' },
+          ]
+        );
+      }
+
+      // beatus://sumup-error → échec
+      if (url.includes('sumup-error')) {
+        const errorMatch = url.match(/error=([^&]+)/);
+        const errorMessage = errorMatch
+          ? decodeURIComponent(errorMatch[1])
+          : 'Une erreur est survenue lors de la connexion SumUp.';
+        Alert.alert('Erreur SumUp', errorMessage);
+      }
+    };
+
+    // Écouter les deep links quand l'app est ouverte
+    const linkSubscription = Linking.addEventListener('url', handleDeepLink);
+
+    // Vérifier si l'app a été ouverte via un deep link
+    Linking.getInitialURL().then((url) => {
+      if (url) handleDeepLink({ url });
+    });
+
+    return () => linkSubscription.remove();
   }, []);
 
   // Vérifier si le profil est complet
@@ -90,17 +147,29 @@ export default function AppNavigator() {
           const data = await response.json();
           setProfileComplete(data.complete === true);
         } else if (user.role === 'team_leader') {
-          const response = await fetch(`${API_BASE_URL}/team-leaders/me`, {
+          const response = await fetch(`${API_BASE_URL}/team-leaders/check-profile`, {
             headers: { 'Authorization': `Bearer ${token}` },
           });
           
           if (response.ok) {
             const data = await response.json();
-            const teamLeader = data.data || data;
-            const isComplete = teamLeader.selectedDepartments?.length > 0 && teamLeader.billingType;
-            setProfileComplete(isComplete);
+            setProfileComplete(data.complete === true);
           } else {
-            setProfileComplete(false);
+            // Fallback: si check-profile n'existe pas encore, utiliser /me
+            const meResponse = await fetch(`${API_BASE_URL}/team-leaders/me`, {
+              headers: { 'Authorization': `Bearer ${token}` },
+            });
+            if (meResponse.ok) {
+              const meData = await meResponse.json();
+              const tl = meData.data || meData;
+              const name = tl.name ?? tl.user?.name ?? '';
+              const email = tl.email ?? tl.user?.email ?? user?.email ?? '';
+              // Profil complet si nom et email existent (phone optionnel)
+              const isComplete = !!(name?.trim() && email?.trim());
+              setProfileComplete(isComplete);
+            } else {
+              setProfileComplete(false);
+            }
           }
         } else {
           setProfileComplete(true);
@@ -132,14 +201,11 @@ export default function AppNavigator() {
     <NavigationContainer ref={navigationRef}>
       <Stack.Navigator screenOptions={{ headerShown: false }}>
         {user ? (
-          // Utilisateur connecté
           profileComplete === false ? (
-            // Profil incomplet - afficher l'écran de complétion
             <Stack.Screen name="ProfileCompletion">
               {(props) => <ProfileCompletionScreen {...props} onComplete={handleProfileComplete} />}
             </Stack.Screen>
           ) : user.role === 'team_leader' ? (
-            // Team Leader avec profil complet
             <>
               <Stack.Screen name="TeamLeaderHome" component={TeamLeaderHomeScreen} />
               <Stack.Screen name="InviteTechnician" component={InviteTechnicianScreen} />
@@ -152,23 +218,31 @@ export default function AppNavigator() {
               <Stack.Screen name="CreateInvoice" component={CreateInvoiceScreen} />
               <Stack.Screen name="MyDocuments" component={MyDocumentsScreen} />
               <Stack.Screen name="BillingSettings" component={BillingSettingsScreen} />
+              <Stack.Screen name="SumUpSettings" component={SumUpSettingsScreen} />
               <Stack.Screen name="QuoteDetail" component={QuoteDetailScreen} />
               <Stack.Screen name="InvoiceDetail" component={InvoiceDetailScreen} />
+              <Stack.Screen name="Messaging">
+                {(props) => <MessagingScreen {...props} accentColor="#7c3aed" />}
+              </Stack.Screen>
             </>
           ) : (
-            // Technicien avec profil complet
             <>
               <Stack.Screen name="TechnicianHome" component={TechnicianHomeScreen} />
+              <Stack.Screen name="TechnicianSettings" component={TechnicianSettingsScreen} />
               <Stack.Screen name="InterventionDetail" component={InterventionDetailScreen} />
               <Stack.Screen name="CreateQuote" component={CreateQuoteScreen} />
               <Stack.Screen name="CreateInvoice" component={CreateInvoiceScreen} />
               <Stack.Screen name="MyDocuments" component={MyDocumentsScreen} />
+              <Stack.Screen name="BillingSettings" component={BillingSettingsScreen} />
+              <Stack.Screen name="SumUpSettings" component={SumUpSettingsScreen} />
               <Stack.Screen name="QuoteDetail" component={QuoteDetailScreen} />
               <Stack.Screen name="InvoiceDetail" component={InvoiceDetailScreen} />
+              <Stack.Screen name="Messaging">
+                {(props) => <MessagingScreen {...props} accentColor="#3b82f6" />}
+              </Stack.Screen>
             </>
           )
         ) : (
-          // Utilisateur non connecté - Page d'accueil
           <Stack.Screen name="Welcome" component={WelcomeScreen} />
         )}
       </Stack.Navigator>

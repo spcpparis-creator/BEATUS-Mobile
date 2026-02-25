@@ -14,12 +14,15 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 import * as WebBrowser from 'expo-web-browser';
 import * as Linking from 'expo-linking';
+import * as AppleAuthentication from 'expo-apple-authentication';
+import { AppState, AppStateStatus } from 'react-native';
 import Constants from 'expo-constants';
 import { useAuth } from '../contexts/AuthContext';
 import { GOOGLE_CLIENT_ID, COLORS, API_BASE_URL } from '../config/api';
+import ForgotPasswordScreen from './ForgotPasswordScreen';
 
 // URL du frontend web pour la redirection OAuth
-const WEB_FRONTEND_URL = 'https://beatus-gamma.vercel.app';
+const WEB_FRONTEND_URL = 'https://app.beatus-app.com';
 
 // Fonction pour obtenir l'URL de redirection correcte
 const getRedirectUrl = () => {
@@ -54,33 +57,28 @@ interface InvitationData {
 
 export default function WelcomeScreen() {
   const { loginWithGoogle, loginWithGoogleAndInvitation, login } = useAuth();
-  const [mode, setMode] = useState<'choice' | 'login' | 'invitation'>('choice');
+  const [mode, setMode] = useState<'choice' | 'login' | 'invitation' | 'forgot_password'>('choice');
   const [invitationCode, setInvitationCode] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [isValidating, setIsValidating] = useState(false);
   const [validatedInvitation, setValidatedInvitation] = useState<InvitationData | null>(null);
 
-  // Écouter les deep links pour le retour OAuth
+  // Écouter les deep links pour le retour OAuth (connexion directe au dashboard)
   useEffect(() => {
-    const handleDeepLink = async (event: { url: string }) => {
-      console.log('Deep link reçu:', event.url);
+    const processAuthUrl = async (url: string) => {
+      if (!url || !url.includes('token=')) return;
       
-      // Parser l'URL pour extraire le token
-      // Gérer les deux formats: exp://...?token=... et beatus://auth?token=...
       let token: string | null = null;
       let userJson: string | null = null;
       
       try {
-        // Essayer de parser avec URL standard
-        const url = new URL(event.url);
-        token = url.searchParams.get('token');
-        userJson = url.searchParams.get('user');
+        const urlObj = new URL(url);
+        token = urlObj.searchParams.get('token');
+        userJson = urlObj.searchParams.get('user');
       } catch {
-        // Si ça échoue (format exp://), extraire manuellement
-        const queryStart = event.url.indexOf('?');
+        const queryStart = url.indexOf('?');
         if (queryStart !== -1) {
-          const queryString = event.url.substring(queryStart + 1);
-          const params = new URLSearchParams(queryString);
+          const params = new URLSearchParams(url.substring(queryStart + 1));
           token = params.get('token');
           userJson = params.get('user');
         }
@@ -89,13 +87,12 @@ export default function WelcomeScreen() {
       if (token && userJson) {
         try {
           const user = JSON.parse(decodeURIComponent(userJson));
-          
-          // Vérifier le rôle
           if (user.role !== 'technician' && user.role !== 'team_leader') {
             Alert.alert('Accès refusé', 'Cette application est réservée aux techniciens et chefs d\'équipe.');
             return;
           }
-          
+          // Fermer le navigateur OAuth si ouvert
+          WebBrowser.maybeCompleteAuthSession();
           await login(token, user);
         } catch (error) {
           console.error('Erreur parsing user:', error);
@@ -104,27 +101,34 @@ export default function WelcomeScreen() {
       }
     };
 
-    // Écouter les liens entrants
-    const subscription = RNLinking.addEventListener('url', handleDeepLink);
+    const subscription = RNLinking.addEventListener('url', (event) => processAuthUrl(event.url));
     
-    // Vérifier si l'app a été ouverte avec un lien
+    // Vérifier si l'app a été ouverte avec un lien (cold start)
     RNLinking.getInitialURL().then((url) => {
-      if (url) {
-        handleDeepLink({ url });
+      if (url) processAuthUrl(url);
+    });
+
+    // Vérifier aussi quand l'app revient au premier plan (cas où le deep link arrive pendant le chargement)
+    const appStateSub = AppState.addEventListener('change', (nextState: AppStateStatus) => {
+      if (nextState === 'active') {
+        RNLinking.getInitialURL().then((url) => {
+          if (url && url.includes('token=')) processAuthUrl(url);
+        });
       }
     });
 
     return () => {
       subscription.remove();
+      appStateSub.remove();
     };
   }, [login]);
 
   const handleGooglePress = async () => {
     setIsLoading(true);
     try {
-      // Obtenir l'URL de redirection correcte pour l'environnement actuel
+      // Pré-chauffer le navigateur pour une transition fluide
+      WebBrowser.warmUpAsync?.();
       const redirectUrl = getRedirectUrl();
-      console.log('Redirect URL pour OAuth:', redirectUrl);
       
       // Construire l'URL d'authentification via le frontend web
       // Le frontend gèrera l'OAuth et redirigera vers l'app avec le token
@@ -154,6 +158,57 @@ export default function WelcomeScreen() {
     }
   };
 
+  const handleApplePress = async () => {
+    setIsLoading(true);
+    try {
+      const credential = await AppleAuthentication.signInAsync({
+        requestedScopes: [
+          AppleAuthentication.AppleAuthenticationScope.FULL_NAME,
+          AppleAuthentication.AppleAuthenticationScope.EMAIL,
+        ],
+      });
+
+      const identityToken = credential.identityToken;
+      if (!identityToken) {
+        Alert.alert('Erreur', 'Impossible de récupérer le token Apple');
+        return;
+      }
+
+      const payload: Record<string, string> = { token: identityToken };
+      if (validatedInvitation) {
+        payload.invitationCode = validatedInvitation.code;
+        payload.role = validatedInvitation.type;
+        payload.tenantId = validatedInvitation.tenantId;
+      }
+
+      const response = await fetch(`${API_BASE_URL}/auth/apple`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        Alert.alert('Erreur', data.error || 'Échec de la connexion Apple');
+        return;
+      }
+
+      if (data.user?.role !== 'technician' && data.user?.role !== 'team_leader') {
+        Alert.alert('Accès refusé', "Cette application est réservée aux techniciens et chefs d'équipe.");
+        return;
+      }
+
+      await login(data.token, data.user);
+    } catch (error: any) {
+      if (error.code === 'ERR_REQUEST_CANCELED') return;
+      console.error('Erreur Apple Auth:', error);
+      Alert.alert('Erreur de connexion', error.message || 'Impossible de se connecter avec Apple');
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
   const validateInvitationCode = async () => {
     if (!invitationCode.trim()) {
       Alert.alert('Erreur', 'Veuillez entrer un code d\'invitation');
@@ -176,13 +231,7 @@ export default function WelcomeScreen() {
       }
 
       setValidatedInvitation(data.invitation);
-      
-      const roleLabel = data.invitation.type === 'team_leader' ? 'Chef d\'équipe' : 'Technicien';
-      Alert.alert(
-        'Code validé ✓',
-        `Vous êtes invité en tant que ${roleLabel} par ${data.invitation.creatorName}.\n\nConnectez-vous avec Google pour créer votre compte.`,
-        [{ text: 'Continuer' }]
-      );
+      // Pas d'alerte : affichage direct du bouton "Créer mon compte avec Google" (flux sans formulaire)
     } catch (error: any) {
       Alert.alert('Erreur', 'Impossible de valider le code. Vérifiez votre connexion internet.');
     } finally {
@@ -255,6 +304,30 @@ export default function WelcomeScreen() {
             <Text style={styles.googleButtonText}>Continuer avec Google</Text>
           </>
         )}
+      </TouchableOpacity>
+
+      {Platform.OS === 'ios' && (
+        <TouchableOpacity
+          style={[styles.appleButton, isLoading && styles.buttonDisabled]}
+          onPress={handleApplePress}
+          disabled={isLoading}
+        >
+          {isLoading ? (
+            <ActivityIndicator color="#fff" size="small" />
+          ) : (
+            <>
+              <Text style={styles.appleIconText}></Text>
+              <Text style={styles.appleButtonText}>Continuer avec Apple</Text>
+            </>
+          )}
+        </TouchableOpacity>
+      )}
+
+      <TouchableOpacity
+        style={styles.forgotPasswordButton}
+        onPress={() => setMode('forgot_password')}
+      >
+        <Text style={styles.forgotPasswordText}>Mot de passe oublié ?</Text>
       </TouchableOpacity>
     </View>
   );
@@ -333,10 +406,31 @@ export default function WelcomeScreen() {
               </>
             )}
           </TouchableOpacity>
+
+          {Platform.OS === 'ios' && (
+            <TouchableOpacity
+              style={[styles.appleButton, styles.googleButtonMargin, isLoading && styles.buttonDisabled]}
+              onPress={handleApplePress}
+              disabled={isLoading}
+            >
+              {isLoading ? (
+                <ActivityIndicator color="#fff" size="small" />
+              ) : (
+                <>
+                  <Text style={styles.appleIconText}></Text>
+                  <Text style={styles.appleButtonText}>Créer mon compte avec Apple</Text>
+                </>
+              )}
+            </TouchableOpacity>
+          )}
         </View>
       )}
     </KeyboardAvoidingView>
   );
+
+  if (mode === 'forgot_password') {
+    return <ForgotPasswordScreen onBack={() => setMode('login')} />;
+  }
 
   return (
     <SafeAreaView style={styles.container}>
@@ -472,7 +566,7 @@ const styles = StyleSheet.create({
     elevation: 5,
   },
   googleButtonMargin: {
-    marginTop: 20,
+    marginTop: 12,
   },
   buttonDisabled: {
     opacity: 0.6,
@@ -492,6 +586,31 @@ const styles = StyleSheet.create({
     color: '#4285f4',
   },
   googleButtonText: {
+    color: '#fff',
+    fontSize: 16,
+    fontWeight: '600',
+  },
+  appleButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#000',
+    paddingVertical: 16,
+    paddingHorizontal: 24,
+    borderRadius: 16,
+    marginTop: 12,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.3,
+    shadowRadius: 8,
+    elevation: 5,
+  },
+  appleIconText: {
+    color: '#fff',
+    fontSize: 22,
+    marginRight: 10,
+  },
+  appleButtonText: {
     color: '#fff',
     fontSize: 16,
     fontWeight: '600',
@@ -556,6 +675,15 @@ const styles = StyleSheet.create({
   invitationInfoText: {
     fontSize: 14,
     color: COLORS.textMuted,
+  },
+  forgotPasswordButton: {
+    marginTop: 24,
+    alignItems: 'center',
+  },
+  forgotPasswordText: {
+    fontSize: 14,
+    color: COLORS.primary,
+    fontWeight: '500',
   },
   footer: {
     paddingVertical: 20,

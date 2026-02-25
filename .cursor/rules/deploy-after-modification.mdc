@@ -1,0 +1,33 @@
+---
+description: Déploiement automatique en production après chaque modification
+alwaysApply: true
+---
+
+# Déploiement automatique (production)
+
+Après chaque modification du code, déployer les composants concernés.
+
+## Règles
+
+| Fichiers modifiés | Action |
+|-------------------|--------|
+| `../BEATUS/backend/**` | Déployer le backend |
+| `../BEATUS/src/**` (web) | Déployer le frontend |
+| `src/**`, `app.json`, `App.tsx` (BEATUS-Mobile) | Build iOS : `npx eas build --profile preview --platform ios --local` |
+
+## Commandes
+
+```bash
+# Backend (depuis BEATUS)
+cd ../BEATUS/backend && deployctl deploy --project=beatus-backend --entrypoint=src/main.ts
+
+# Frontend (depuis BEATUS)
+cd ../BEATUS && npm run build && vercel --prod
+
+# Mobile (depuis BEATUS-Mobile)
+npx eas build --profile preview --platform ios --local
+```
+
+## Après chaque modification
+
+Exécuter les déploiements correspondants aux fichiers modifiés.

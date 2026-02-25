@@ -1,0 +1,89 @@
+# Instructions pour l'application BEATUS Admin (invitations)
+
+## Contexte
+
+L'application BEATUS comprend :
+- **BEATUS Admin** (application web) : interface pour les administrateurs
+- **BEATUS Mobile** (React Native/Expo) : pour Team Leaders (TL) et Techniciens (TECH)
+
+L'admin peut inviter directement des **Team Leaders** et des **Techniciens** en générant des codes d'invitation. Les valeurs saisies lors de la génération doivent être visibles dans l'onglet **Paramètres** du dashboard TL ou TECH dans l'app mobile.
+
+---
+
+## Fonctionnalités à implémenter côté Admin
+
+### 1. Génération de codes d'invitation
+
+Lors de la création d'un code d'invitation (TL ou TECH), l'admin doit pouvoir saisir et envoyer au backend :
+
+#### Pour un **Team Leader** (TL) :
+| Champ | Type | Description |
+|-------|------|-------------|
+| `type` | string | `"team_leader"` |
+| `email` | string | (optionnel) Email du TL invité |
+| `commissionFromAdmin` | number | % de commission que le TL recevra (ex: 30, 50) |
+| `selectedDepartments` | string[] | Codes départements (ex: `["75", "92", "93"]`) |
+| `activityIds` | string[] | IDs des activités/spécialités du tenant |
+| `billingType` | string | `"spcp"` (facturation plateforme) ou `"self"` (auto-facturation) |
+
+#### Pour un **Technicien** (TECH) :
+| Champ | Type | Description |
+|-------|------|-------------|
+| `type` | string | `"technician"` |
+| `email` | string | (optionnel) Email du technicien invité |
+| `commissionPercentage` | number | % de commission du technicien (ex: 25, 30) |
+| `selectedDepartments` | string[] | Secteurs où le technicien peut intervenir |
+| `activityIds` | string[] | Types d'interventions (ex: Plomberie, Électricité) |
+| `teamLeaderId` | string | (si invité par TL) - ou invité directement par admin |
+
+### 2. Appel API backend
+
+```
+POST /api/invitations/generate
+Authorization: Bearer <admin_token>
+Content-Type: application/json
+
+Body: {
+  "type": "team_leader" | "technician",
+  "email": "...",
+  "commissionFromAdmin": 30,        // pour TL
+  "commissionPercentage": 30,       // pour TECH
+  "selectedDepartments": ["75", "92"],
+  "activityIds": ["uuid-1", "uuid-2"],
+  "billingType": "spcp" | "self"    // pour TL
+}
+```
+
+Le backend doit **persister** ces valeurs avec l'invitation pour qu'elles soient appliquées au profil de l'utilisateur lors de son inscription.
+
+### 3. Récupération des activités (pour les dropdowns)
+
+```
+GET /api/activities
+Authorization: Bearer <admin_token>
+```
+
+Retourne la liste des activités du tenant (Plomberie, Électricité, etc.) avec `id` et `name`.
+
+### 4. Liste des départements français
+
+Utiliser les codes à 2 chiffres (ex: 01, 02, 75, 92). Une liste complète est disponible dans `InviteTechnicianScreen.tsx` du projet mobile (FRENCH_DEPARTMENTS).
+
+---
+
+## Affichage côté Mobile (déjà implémenté)
+
+- **TL** : Onglet Paramètres affiche "Ma configuration - Valeurs définies lors de la génération du code d'invitation par l'admin" avec commission, secteurs, activités, type de facturation.
+- **TECH** : Bouton ⚙️ dans le header → écran Paramètres avec commission, secteurs, activités.
+
+Le backend doit retourner ces champs dans :
+- `GET /api/team-leaders/me` pour un TL
+- `GET /api/technicians/check-profile` pour un TECH
+
+---
+
+## Points importants
+
+1. **Persistance** : Les valeurs de l'invitation doivent être stockées en base et recopiées sur le profil utilisateur (TL ou TECH) lors de l'inscription via le code.
+2. **Validation du code** : `POST /api/invitations/validate` avec `{ "code": "XXX-XXX" }` retourne les infos de l'invitation (type, creatorName, tenantId, code).
+3. **Utilisation du code** : `POST /api/auth/google` avec `invitationCode`, `role`, `tenantId` lors de l'inscription.

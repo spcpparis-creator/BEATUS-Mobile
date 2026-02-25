@@ -1,6 +1,7 @@
 // Service API pour l'application mobile BEATUS
 import * as SecureStore from 'expo-secure-store';
 import { API_BASE_URL } from '../config/api';
+import { logErrorDetailed } from '../utils/errorLogger';
 
 class ApiService {
   private baseUrl = API_BASE_URL;
@@ -25,7 +26,22 @@ class ApiService {
 
     if (!response.ok) {
       const error = await response.json().catch(() => ({}));
-      throw new Error(error.error || error.message || 'Erreur serveur');
+      const errMsg = error.error || error.message || 'Erreur serveur';
+      logErrorDetailed({
+        file: 'src/services/api.ts',
+        line: 28,
+        function: 'request',
+        code: 'if (!response.ok) { throw ... }',
+        message: `${options.method || 'GET'} ${endpoint} → ${response.status} ${response.statusText}`,
+        context: {
+          endpoint: `${this.baseUrl}${endpoint}`,
+          method: options.method || 'GET',
+          status: response.status,
+          statusText: response.statusText,
+          responseBody: error,
+        },
+      });
+      throw new Error(errMsg);
     }
 
     return response.json();
@@ -135,9 +151,28 @@ class ApiService {
     });
   }
 
-  // Team Leaders
+  // Team Leaders - normalise snake_case → camelCase (valeurs configurées par l'admin)
+  // Les paramètres (secteurs, activités, commission, billingType) doivent venir du backend (copiés depuis l'invitation)
   async getTeamLeaderMe() {
-    return this.request<any>('/team-leaders/me');
+    const raw = await this.request<any>('/team-leaders/me');
+    const data = raw?.data ?? raw?.teamLeader ?? raw;
+    if (!data) return raw;
+    const inv = data.invitation ?? data.invitationConfig ?? data.invitation_config ?? {};
+    const normalized = {
+      ...data,
+      id: data.id,
+      userId: data.userId ?? data.user_id,
+      name: data.name,
+      email: data.email,
+      phone: data.phone,
+      commissionFromAdmin: data.commissionFromAdmin ?? data.commission_from_admin ?? inv.commissionFromAdmin ?? inv.commission_from_admin,
+      defaultTechnicianCommission: data.defaultTechnicianCommission ?? data.default_technician_commission ?? inv.defaultTechnicianCommission,
+      billingType: data.billingType ?? data.billing_type ?? inv.billingType ?? inv.billing_type,
+      selectedDepartments: data.selectedDepartments ?? data.selected_departments ?? inv.selectedDepartments ?? inv.selected_departments ?? [],
+      activityIds: data.activityIds ?? data.activity_ids ?? inv.activityIds ?? inv.activity_ids ?? [],
+      activities: data.activities ?? inv.activities ?? [],
+    };
+    return { ...raw, data: normalized };
   }
 
   async updateTeamLeader(id: string, data: any) {
@@ -173,6 +208,7 @@ class ApiService {
   async updateTechnicianByTeamLeader(teamLeaderId: string, technicianId: string, data: {
     selectedDepartments?: string[];
     specialties?: string[];
+    activityIds?: string[];
     commissionPercentage?: number;
     name?: string;
     phone?: string;
@@ -231,7 +267,11 @@ class ApiService {
 
   // User Templates (pour auto-facturation)
   async getUserTemplates() {
-    return this.request<any[]>('/user-templates');
+    const headers = await this.getHeaders();
+    const response = await fetch(`${this.baseUrl}/user-templates`, { headers });
+    if (response.status === 403) return [];
+    if (!response.ok) throw new Error('Erreur chargement templates');
+    return response.json();
   }
 
   async saveUserTemplate(templateType: string, content: string, variables?: Record<string, any>) {
@@ -436,6 +476,121 @@ class ApiService {
     return this.request<any>('/tenant/settings', {
       method: 'GET',
     });
+  }
+
+  // ========== STRIPE CONNECT ==========
+
+  async createStripeCheckout(data: {
+    amount: number;
+    quoteId?: string;
+    quoteReference?: string;
+    clientName?: string;
+    description?: string;
+  }) {
+    return this.request<{ checkoutUrl: string; checkoutId: string; amount: number }>('/stripe-connect/create-checkout', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
+  // ========== EMAIL ==========
+
+  async sendQuoteWithPdf(data: {
+    to: string;
+    subject: string;
+    message: string;
+    pdfBase64: string;
+    quoteId?: string;
+  }) {
+    return this.request<{ success: boolean; messageId?: string }>('/email/send-quote-with-pdf', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
+  async sendInvoiceById(invoiceId: string) {
+    return this.request<{ success: boolean; messageId?: string }>(`/email/send-invoice/${invoiceId}`, {
+      method: 'POST',
+    });
+  }
+
+  // ========== SUMUP ==========
+
+  /** Vérifie les permissions SumUp de l'utilisateur courant */
+  async getSumUpPermission() {
+    return this.request<{
+      allowed: boolean;
+      reason: string | null;
+      billingType: string | null;
+      role: string;
+    }>('/sumup/permission', { method: 'GET' });
+  }
+
+  /** Statut de connexion SumUp + droits */
+  async getSumUpStatus() {
+    return this.request<{
+      connected: boolean;
+      merchantId: string | null;
+      merchantCode: string | null;
+      connectedAt: string | null;
+      canManage: boolean;
+      permissionReason: string | null;
+    }>('/sumup/status', { method: 'GET' });
+  }
+
+  /** Retourne l'URL OAuth SumUp pour ouvrir dans le navigateur */
+  async getSumUpConnectUrl() {
+    return this.request<{ url: string }>('/sumup/connect-url', { method: 'GET' });
+  }
+
+  /** Déconnecte le compte SumUp du tenant */
+  async disconnectSumUp() {
+    return this.request<{ message: string }>('/sumup/disconnect', { method: 'POST' });
+  }
+
+  /** Crée un checkout SumUp (lien de paiement) */
+  async createSumUpCheckout(data: {
+    amount: number;
+    currency?: string;
+    description?: string;
+    purpose: 'deposit' | 'balance';
+    referenceId?: string;
+    referenceType?: 'quote' | 'invoice';
+  }) {
+    return this.request<{
+      checkoutId: string;
+      checkoutUrl: string;
+      checkoutReference: string;
+      amount: number;
+      status: string;
+    }>('/sumup/checkout', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
+  /** Vérifie le statut d'un checkout SumUp (PENDING, PAID, FAILED) */
+  async getSumUpCheckoutStatus(checkoutId: string) {
+    return this.request<{
+      checkoutId: string;
+      status: string;
+      isPaid: boolean;
+      amount: number;
+      transactionId: string | null;
+    }>(`/sumup/checkout/${checkoutId}/status`, { method: 'GET' });
+  }
+
+  /** Récupère le nombre total de messages non lus */
+  async getUnreadMessagesCount(): Promise<number> {
+    try {
+      const conversations = await this.request<any[]>('/messaging/conversations', { method: 'GET' });
+      if (Array.isArray(conversations)) {
+        return conversations.reduce((sum, c) => sum + (c.unread_count || 0), 0);
+      }
+      return 0;
+    } catch {
+      return 0;
+    }
   }
 }
 

@@ -9,9 +9,11 @@ import {
   ActivityIndicator,
   Linking,
   TextInput,
+  Image,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import * as Location from 'expo-location';
+import * as ImagePicker from 'expo-image-picker';
 import api from '../../services/api';
 import { COLORS, STATUS_COLORS, STATUS_LABELS, TYPE_LABELS } from '../../config/api';
 
@@ -27,6 +29,10 @@ export default function InterventionDetailScreen({ route, navigation }: Props) {
   const [actionLoading, setActionLoading] = useState<string | null>(null);
   const [completionNote, setCompletionNote] = useState('');
   const [finalAmount, setFinalAmount] = useState('');
+  const [materialCost, setMaterialCost] = useState('');
+  const [description, setDescription] = useState('');
+  const [timeSpent, setTimeSpent] = useState('');
+  const [photos, setPhotos] = useState<string[]>([]);
   const [showCompletionForm, setShowCompletionForm] = useState(false);
 
   useEffect(() => {
@@ -118,6 +124,38 @@ export default function InterventionDetailScreen({ route, navigation }: Props) {
     }
   };
 
+  const handleTakePhoto = async () => {
+    const { status } = await ImagePicker.requestCameraPermissionsAsync();
+    if (status !== 'granted') {
+      Alert.alert('Permission requise', 'L\'accès à la caméra est nécessaire pour prendre des photos.');
+      return;
+    }
+    const result = await ImagePicker.launchCameraAsync({
+      mediaTypes: ['images'],
+      quality: 0.7,
+      base64: false,
+    });
+    if (!result.canceled && result.assets[0]) {
+      setPhotos(prev => [...prev, result.assets[0].uri]);
+    }
+  };
+
+  const handlePickPhoto = async () => {
+    const result = await ImagePicker.launchImageLibraryAsync({
+      mediaTypes: ['images'],
+      quality: 0.7,
+      allowsMultipleSelection: true,
+      selectionLimit: 5,
+    });
+    if (!result.canceled && result.assets.length > 0) {
+      setPhotos(prev => [...prev, ...result.assets.map(a => a.uri)]);
+    }
+  };
+
+  const removePhoto = (index: number) => {
+    setPhotos(prev => prev.filter((_, i) => i !== index));
+  };
+
   const handleComplete = async () => {
     if (!finalAmount || parseFloat(finalAmount) <= 0) {
       Alert.alert('Erreur', 'Veuillez entrer un montant final valide');
@@ -127,16 +165,36 @@ export default function InterventionDetailScreen({ route, navigation }: Props) {
     setActionLoading('complete');
     try {
       const location = await getCurrentLocation();
-      await api.completeIntervention(interventionId, {
-        // Envoyer amountTTC pour SPCP billing, amountRealized pour self billing
+      const completionData: any = {
         amountTTC: parseFloat(finalAmount),
         amountRealized: parseFloat(finalAmount),
-        notes: completionNote,
+        notes: completionNote || undefined,
+        description: description || undefined,
         completedAt: new Date().toISOString(),
         location,
-      });
-      Alert.alert('Succès', 'Intervention terminée avec succès !');
-      navigation.goBack();
+      };
+
+      if (materialCost) {
+        completionData.materialCost = parseFloat(materialCost);
+        completionData.materialCostSelf = parseFloat(materialCost);
+      }
+      if (timeSpent) {
+        completionData.timeSpent = parseFloat(timeSpent);
+      }
+      if (photos.length > 0) {
+        completionData.photos = photos;
+      }
+
+      await api.completeIntervention(interventionId, completionData);
+
+      const amt = parseFloat(finalAmount);
+      const mat = parseFloat(materialCost) || 0;
+      const gain = mat > 0 ? (amt - mat) : amt;
+      Alert.alert(
+        'Intervention terminée !',
+        `Montant : ${formatCurrency(amt)}${mat > 0 ? `\nMatériel : ${formatCurrency(mat)}` : ''}${photos.length > 0 ? `\n${photos.length} photo(s) jointe(s)` : ''}`,
+        [{ text: 'OK', onPress: () => navigation.goBack() }]
+      );
     } catch (error: any) {
       Alert.alert('Erreur', error.message || 'Impossible de terminer l\'intervention');
     } finally {
@@ -227,7 +285,7 @@ export default function InterventionDetailScreen({ route, navigation }: Props) {
   const isAccepted = currentStep >= 1;
 
   return (
-    <SafeAreaView style={styles.container} edges={['bottom']}>
+    <SafeAreaView style={styles.container} edges={['top', 'bottom']}>
       <ScrollView style={styles.scrollView}>
         {/* Header */}
         <View style={styles.header}>
@@ -362,7 +420,7 @@ export default function InterventionDetailScreen({ route, navigation }: Props) {
           <Text style={styles.sectionTitle}>Date prévue</Text>
           <View style={styles.card}>
             <Text style={styles.dateText}>
-              {intervention.scheduledDate ? formatDate(intervention.scheduledDate) : 'Non planifiée'}
+              {(intervention.scheduledAt || intervention.scheduledDate || intervention.scheduled_at) ? formatDate(intervention.scheduledAt || intervention.scheduledDate || intervention.scheduled_at) : 'Non planifiée'}
             </Text>
           </View>
         </View>
@@ -401,15 +459,81 @@ export default function InterventionDetailScreen({ route, navigation }: Props) {
         {/* Formulaire de complétion */}
         {showCompletionForm && canComplete && (
           <View style={styles.section}>
-            <Text style={styles.sectionTitle}>Terminer l'intervention</Text>
+            <Text style={styles.sectionTitle}>📋 Rapport de fin d'intervention</Text>
+
+            {/* Montants */}
             <View style={styles.card}>
-              <Text style={styles.inputLabel}>Montant final (€)</Text>
+              <Text style={styles.cardSubtitle}>💰 Montants</Text>
+              <View style={{ flexDirection: 'row', gap: 10 }}>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.inputLabel}>Montant final TTC (€) *</Text>
+                  <TextInput
+                    style={styles.input}
+                    value={finalAmount}
+                    onChangeText={setFinalAmount}
+                    keyboardType="decimal-pad"
+                    placeholder="0.00"
+                  />
+                </View>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.inputLabel}>Coût matériel (€)</Text>
+                  <TextInput
+                    style={styles.input}
+                    value={materialCost}
+                    onChangeText={setMaterialCost}
+                    keyboardType="decimal-pad"
+                    placeholder="0.00"
+                  />
+                </View>
+              </View>
+              <View style={{ flexDirection: 'row', gap: 10, marginTop: 8 }}>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.inputLabel}>Temps passé (heures)</Text>
+                  <TextInput
+                    style={styles.input}
+                    value={timeSpent}
+                    onChangeText={setTimeSpent}
+                    keyboardType="decimal-pad"
+                    placeholder="Ex: 1.5"
+                  />
+                </View>
+                <View style={{ flex: 1 }} />
+              </View>
+
+              {/* Résumé des montants */}
+              {parseFloat(finalAmount) > 0 && (
+                <View style={styles.amountSummary}>
+                  <View style={styles.amountSummaryRow}>
+                    <Text style={styles.amountSummaryLabel}>Total TTC</Text>
+                    <Text style={styles.amountSummaryValue}>{formatCurrency(parseFloat(finalAmount) || 0)}</Text>
+                  </View>
+                  {parseFloat(materialCost) > 0 && (
+                    <View style={styles.amountSummaryRow}>
+                      <Text style={styles.amountSummaryLabel}>Matériel</Text>
+                      <Text style={[styles.amountSummaryValue, { color: '#ef4444' }]}>- {formatCurrency(parseFloat(materialCost) || 0)}</Text>
+                    </View>
+                  )}
+                  {timeSpent ? (
+                    <View style={styles.amountSummaryRow}>
+                      <Text style={styles.amountSummaryLabel}>Temps</Text>
+                      <Text style={styles.amountSummaryValue}>{timeSpent}h</Text>
+                    </View>
+                  ) : null}
+                </View>
+              )}
+            </View>
+
+            {/* Description et notes */}
+            <View style={[styles.card, { marginTop: 12 }]}>
+              <Text style={styles.cardSubtitle}>📝 Détails</Text>
+              <Text style={styles.inputLabel}>Description des travaux</Text>
               <TextInput
-                style={styles.input}
-                value={finalAmount}
-                onChangeText={setFinalAmount}
-                keyboardType="decimal-pad"
-                placeholder="0.00"
+                style={[styles.input, styles.textArea]}
+                value={description}
+                onChangeText={setDescription}
+                multiline
+                numberOfLines={3}
+                placeholder="Décrivez les travaux effectués..."
               />
               <Text style={styles.inputLabel}>Notes / Observations</Text>
               <TextInput
@@ -417,21 +541,52 @@ export default function InterventionDetailScreen({ route, navigation }: Props) {
                 value={completionNote}
                 onChangeText={setCompletionNote}
                 multiline
-                numberOfLines={4}
-                placeholder="Travaux effectués, remarques..."
+                numberOfLines={3}
+                placeholder="Remarques, problèmes rencontrés..."
               />
-              <TouchableOpacity
-                style={[styles.actionButton, styles.completeButton]}
-                onPress={handleComplete}
-                disabled={actionLoading === 'complete'}
-              >
-                {actionLoading === 'complete' ? (
-                  <ActivityIndicator color="#fff" />
-                ) : (
-                  <Text style={styles.actionButtonText}>✓ Terminer l'intervention</Text>
-                )}
-              </TouchableOpacity>
             </View>
+
+            {/* Photos */}
+            <View style={[styles.card, { marginTop: 12 }]}>
+              <Text style={styles.cardSubtitle}>📸 Photos</Text>
+              <Text style={styles.photoHint}>Ajoutez des photos avant/après l'intervention</Text>
+              
+              <View style={styles.photosGrid}>
+                {photos.map((uri, index) => (
+                  <View key={index} style={styles.photoContainer}>
+                    <Image source={{ uri }} style={styles.photoThumbnail} />
+                    <TouchableOpacity
+                      style={styles.photoRemoveBtn}
+                      onPress={() => removePhoto(index)}
+                    >
+                      <Text style={styles.photoRemoveText}>✕</Text>
+                    </TouchableOpacity>
+                  </View>
+                ))}
+              </View>
+
+              <View style={styles.photoActions}>
+                <TouchableOpacity style={styles.photoButton} onPress={handleTakePhoto}>
+                  <Text style={styles.photoButtonText}>📷 Prendre une photo</Text>
+                </TouchableOpacity>
+                <TouchableOpacity style={[styles.photoButton, styles.photoButtonOutline]} onPress={handlePickPhoto}>
+                  <Text style={styles.photoButtonOutlineText}>🖼️ Galerie</Text>
+                </TouchableOpacity>
+              </View>
+            </View>
+
+            {/* Bouton de validation */}
+            <TouchableOpacity
+              style={[styles.actionButton, styles.completeButton, { marginTop: 16 }]}
+              onPress={handleComplete}
+              disabled={actionLoading === 'complete'}
+            >
+              {actionLoading === 'complete' ? (
+                <ActivityIndicator color="#fff" />
+              ) : (
+                <Text style={styles.actionButtonText}>✓ Terminer l'intervention</Text>
+              )}
+            </TouchableOpacity>
           </View>
         )}
 
@@ -503,6 +658,17 @@ export default function InterventionDetailScreen({ route, navigation }: Props) {
             <Text style={styles.actionButtonText}>✓ Terminer l'intervention</Text>
           </TouchableOpacity>
         )}
+
+        {/* Bouton Message - lié à l'intervention */}
+        <TouchableOpacity
+          style={styles.messageButton}
+          onPress={() => navigation.navigate('Messaging', {
+            interventionId,
+            interventionRef: intervention.reference,
+          })}
+        >
+          <Text style={styles.messageButtonText}>💬 Message ({intervention.reference})</Text>
+        </TouchableOpacity>
 
         {/* Boutons Devis et Facture - toujours visibles */}
         <View style={styles.billingButtonsRow}>
@@ -632,12 +798,17 @@ const styles = StyleSheet.create({
     backgroundColor: COLORS.success,
   },
   backButton: {
-    padding: 8,
+    paddingVertical: 12,
+    paddingHorizontal: 16,
+    marginLeft: -8,
+    minHeight: 44,
+    minWidth: 44,
+    justifyContent: 'center',
   },
   backButtonText: {
     color: '#fff',
-    fontSize: 16,
-    fontWeight: '500',
+    fontSize: 17,
+    fontWeight: '600',
   },
   statusBadge: {
     paddingHorizontal: 12,
@@ -834,10 +1005,25 @@ const styles = StyleSheet.create({
     fontSize: 16,
     fontWeight: '600',
   },
+  messageButton: {
+    backgroundColor: '#eff6ff',
+    borderWidth: 2,
+    borderColor: '#3b82f6',
+    paddingVertical: 14,
+    borderRadius: 14,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginTop: 12,
+  },
+  messageButtonText: {
+    fontSize: 15,
+    fontWeight: '600',
+    color: '#1d4ed8',
+  },
   billingButtonsRow: {
     flexDirection: 'row',
     gap: 12,
-    marginTop: 16,
+    marginTop: 12,
   },
   billingButton: {
     flex: 1,
@@ -886,5 +1072,96 @@ const styles = StyleSheet.create({
     fontSize: 14,
     color: COLORS.primary,
     fontWeight: '500',
+  },
+  cardSubtitle: {
+    fontSize: 15,
+    fontWeight: '700',
+    color: COLORS.text,
+    marginBottom: 12,
+  },
+  amountSummary: {
+    marginTop: 12,
+    paddingTop: 12,
+    borderTopWidth: 1,
+    borderTopColor: '#e5e7eb',
+  },
+  amountSummaryRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    paddingVertical: 4,
+  },
+  amountSummaryLabel: {
+    fontSize: 14,
+    color: '#6b7280',
+  },
+  amountSummaryValue: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: COLORS.text,
+  },
+  photoHint: {
+    fontSize: 13,
+    color: '#9ca3af',
+    marginBottom: 10,
+  },
+  photosGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+    marginBottom: 12,
+  },
+  photoContainer: {
+    position: 'relative',
+    width: 80,
+    height: 80,
+    borderRadius: 10,
+    overflow: 'hidden',
+  },
+  photoThumbnail: {
+    width: '100%',
+    height: '100%',
+    borderRadius: 10,
+  },
+  photoRemoveBtn: {
+    position: 'absolute',
+    top: 2,
+    right: 2,
+    backgroundColor: 'rgba(0,0,0,0.6)',
+    width: 22,
+    height: 22,
+    borderRadius: 11,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  photoRemoveText: {
+    color: '#fff',
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  photoActions: {
+    flexDirection: 'row',
+    gap: 10,
+  },
+  photoButton: {
+    flex: 1,
+    backgroundColor: '#3b82f6',
+    paddingVertical: 10,
+    borderRadius: 10,
+    alignItems: 'center',
+  },
+  photoButtonText: {
+    color: '#fff',
+    fontSize: 14,
+    fontWeight: '600',
+  },
+  photoButtonOutline: {
+    backgroundColor: '#fff',
+    borderWidth: 1.5,
+    borderColor: '#3b82f6',
+  },
+  photoButtonOutlineText: {
+    color: '#3b82f6',
+    fontSize: 14,
+    fontWeight: '600',
   },
 });

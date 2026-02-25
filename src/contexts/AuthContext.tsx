@@ -81,9 +81,23 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const login = async (newToken: string, newUser: User) => {
     await SecureStore.setItemAsync('authToken', newToken);
-    await SecureStore.setItemAsync('authUser', JSON.stringify(newUser));
     setToken(newToken);
     setUser(newUser);
+    // Rafraîchir l'utilisateur depuis la BDD pour avoir tenantId et données cohérentes (comme la version web)
+    try {
+      const response = await fetch(`${API_BASE_URL}/auth/me`, {
+        headers: { Authorization: `Bearer ${newToken}` },
+      });
+      if (response.ok) {
+        const freshUser = await response.json();
+        setUser(freshUser);
+        await SecureStore.setItemAsync('authUser', JSON.stringify(freshUser));
+      } else {
+        await SecureStore.setItemAsync('authUser', JSON.stringify(newUser));
+      }
+    } catch (_) {
+      await SecureStore.setItemAsync('authUser', JSON.stringify(newUser));
+    }
     // Enregistrer les notifications push (techniciens et chefs d'équipe)
     if (newUser.role === 'technician' || newUser.role === 'team_leader') {
       registerAndSubscribe().catch(() => {});

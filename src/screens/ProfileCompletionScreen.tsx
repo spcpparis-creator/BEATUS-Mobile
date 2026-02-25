@@ -11,6 +11,7 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useAuth } from '../contexts/AuthContext';
+import api from '../services/api';
 import { COLORS, API_BASE_URL } from '../config/api';
 import * as SecureStore from 'expo-secure-store';
 
@@ -62,8 +63,9 @@ interface ProfileInfo {
   commissionPercentage?: number;
   teamLeaderName?: string;
   adminName?: string;
-  hasTeamLeader?: boolean; // True si invité par un TL
-  sectorsPreConfigured?: boolean; // True si les secteurs sont déjà configurés par le TL
+  hasTeamLeader?: boolean;
+  availableSectors?: string[]; // Secteurs proposés par l'admin (codes départements)
+  availableActivityIds?: string[]; // Activités proposées par l'admin
 }
 
 export default function ProfileCompletionScreen({ navigation, onComplete }: Props) {
@@ -76,6 +78,8 @@ export default function ProfileCompletionScreen({ navigation, onComplete }: Prop
   const [name, setName] = useState('');
   const [phone, setPhone] = useState('');
   const [selectedDepartments, setSelectedDepartments] = useState<string[]>([]);
+  const [selectedActivityIds, setSelectedActivityIds] = useState<string[]>([]);
+  const [activities, setActivities] = useState<Array<{ id: string; name: string }>>([]);
   const [searchDepartment, setSearchDepartment] = useState('');
 
   // Informations pré-configurées par l'admin (lecture seule)
@@ -83,11 +87,23 @@ export default function ProfileCompletionScreen({ navigation, onComplete }: Prop
   
   // Nombre d'étapes dynamique selon le parcours
   // Si technicien invité par TL avec secteurs pré-configurés → 1 étape seulement
-  const totalSteps = (user?.role === 'technician' && profileInfo.hasTeamLeader && profileInfo.sectorsPreConfigured) ? 1 : 2;
+  const hasSectorsStep = (profileInfo.availableSectors?.length ?? 0) > 0;
+  const hasActivitiesStep = (profileInfo.availableActivityIds?.length ?? 0) > 0;
+  const totalSteps = 1 + (hasSectorsStep ? 1 : 0) + (hasActivitiesStep ? 1 : 0);
 
   useEffect(() => {
     checkProfile();
   }, [user]);
+
+  useEffect(() => {
+    if ((profileInfo.availableActivityIds?.length ?? 0) > 0 && activities.length === 0) {
+      api.getActivities().then((acts: any) => {
+        const list = Array.isArray(acts) ? acts : (acts?.activities || acts || []);
+        const allowed = new Set(profileInfo.availableActivityIds || []);
+        setActivities(list.filter((a: { id: string }) => allowed.has(a.id)));
+      }).catch(() => {});
+    }
+  }, [profileInfo.availableActivityIds]);
 
   const checkProfile = async () => {
     if (!user) return;
@@ -109,26 +125,15 @@ export default function ProfileCompletionScreen({ navigation, onComplete }: Prop
         if (data.technician) {
           setName(data.technician.name || user.name || '');
           setPhone(data.technician.phone || '');
-          
-          // Vérifier si les secteurs sont pré-configurés par le TL
-          const hasSectors = data.technician.selectedDepartments && 
-                            Array.isArray(data.technician.selectedDepartments) && 
-                            data.technician.selectedDepartments.length > 0;
-          
-          if (hasSectors) {
-            setSelectedDepartments(data.technician.selectedDepartments);
-          }
-          
-          // Vérifier si le technicien a été invité par un TL
-          const hasTeamLeader = !!(data.technician.teamLeaderId || data.technician.teamLeaderName);
-          
-          // Informations configurées par l'admin/team leader
+          setSelectedDepartments(data.technician.selectedDepartments || data.technician.selected_departments || []);
+          setSelectedActivityIds(data.technician.activityIds || data.technician.activity_ids || []);
           setProfileInfo({
             billingType: data.technician.billingType,
             commissionPercentage: data.technician.commissionPercentage,
             teamLeaderName: data.technician.teamLeaderName,
-            hasTeamLeader: hasTeamLeader,
-            sectorsPreConfigured: hasTeamLeader && hasSectors, // Secteurs déjà choisis par le TL
+            hasTeamLeader: !!(data.technician.teamLeaderId || data.technician.teamLeaderName),
+            availableSectors: data.availableSectors || [],
+            availableActivityIds: data.availableActivityIds || [],
           });
         } else {
           setName(user.name || '');
@@ -140,23 +145,28 @@ export default function ProfileCompletionScreen({ navigation, onComplete }: Prop
 
         if (response.ok) {
           const data = await response.json();
-          const teamLeader = data.data || data;
+          const tl = data.data || data;
+          const depts = tl.selectedDepartments ?? tl.selected_departments ?? [];
+          const tlName = tl.name ?? tl.user?.name ?? user.name ?? '';
+          const tlPhone = tl.phone ?? tl.user?.phone ?? '';
+          const tlEmail = tl.email ?? tl.user?.email ?? user.email ?? '';
 
-          const isComplete = teamLeader.selectedDepartments?.length > 0;
+          const isComplete = !!(tlPhone?.trim() && (tlEmail?.trim() || tlName?.trim()));
           if (isComplete) {
             onComplete();
             return;
           }
 
-          setName(teamLeader.name || user.name || '');
-          setPhone(teamLeader.phone || '');
-          if (teamLeader.selectedDepartments) {
-            setSelectedDepartments(teamLeader.selectedDepartments);
-          }
-          // Informations configurées par l'admin
+          setName(tlName || user.name || '');
+          setPhone(tlPhone || '');
+          if (depts?.length) setSelectedDepartments(depts);
+          const acts = tl.activityIds ?? tl.activity_ids ?? [];
+          if (acts?.length) setSelectedActivityIds(acts);
           setProfileInfo({
-            billingType: teamLeader.billingType,
-            commissionPercentage: teamLeader.commissionFromAdmin,
+            billingType: tl.billingType ?? tl.billing_type,
+            commissionPercentage: tl.commissionFromAdmin ?? tl.commission_from_admin,
+            availableSectors: tl.availableSectors ?? tl.available_sectors ?? depts ?? [],
+            availableActivityIds: tl.availableActivityIds ?? tl.available_activity_ids ?? acts ?? [],
           });
         } else {
           setName(user.name || '');
@@ -176,7 +186,16 @@ export default function ProfileCompletionScreen({ navigation, onComplete }: Prop
     );
   };
 
-  const filteredDepartments = FRENCH_DEPARTMENTS.filter(
+  const toggleActivity = (id: string) => {
+    setSelectedActivityIds(prev =>
+      prev.includes(id) ? prev.filter(a => a !== id) : [...prev, id]
+    );
+  };
+
+  const availableDepartments = (profileInfo.availableSectors?.length ?? 0) > 0
+    ? FRENCH_DEPARTMENTS.filter(d => profileInfo.availableSectors!.includes(d.code))
+    : FRENCH_DEPARTMENTS;
+  const filteredDepartments = availableDepartments.filter(
     d => d.code.includes(searchDepartment) || d.name.toLowerCase().includes(searchDepartment.toLowerCase())
   );
 
@@ -209,13 +228,10 @@ export default function ProfileCompletionScreen({ navigation, onComplete }: Prop
 
   const nextStep = () => {
     if (validateStep()) {
-      // Si on est à l'étape 1 et qu'il n'y a qu'une seule étape (secteurs pré-configurés), soumettre directement
-      if (step === 1 && totalSteps === 1) {
+      if (step >= totalSteps) {
         handleSubmit();
-      } else if (step < totalSteps) {
-        setStep(step + 1);
       } else {
-        handleSubmit();
+        setStep(step + 1);
       }
     }
   };
@@ -231,16 +247,21 @@ export default function ProfileCompletionScreen({ navigation, onComplete }: Prop
     try {
       const token = await SecureStore.getItemAsync('authToken');
 
-      // Seulement les données que l'utilisateur peut modifier
+      // Données à envoyer : name, email, phone → enregistrés définitivement en DB
+      // Pour TL : inclure selectedDepartments et activityIds (définis par l'admin lors de l'invitation)
       const profileData: Record<string, any> = {
         name,
         phone,
+        ...(user?.email ? { email: user.email } : {}),
       };
       
-      // N'inclure les secteurs que si NON pré-configurés par le TL
-      // (évite d'écraser les choix du TL)
-      if (!profileInfo.sectorsPreConfigured) {
-        profileData.selectedDepartments = selectedDepartments;
+      if (user?.role === 'team_leader') {
+        // Toujours envoyer secteurs et activités du TL (configurés par l'admin) pour les persister
+        if (selectedDepartments.length > 0) profileData.selectedDepartments = selectedDepartments;
+        if (selectedActivityIds.length > 0) profileData.activityIds = selectedActivityIds;
+      } else if (user?.role === 'technician') {
+        if (hasSectorsStep) profileData.selectedDepartments = selectedDepartments;
+        if (hasActivitiesStep) profileData.activityIds = selectedActivityIds;
       }
 
       let endpoint = '';
@@ -379,35 +400,17 @@ export default function ProfileCompletionScreen({ navigation, onComplete }: Prop
                   </View>
                 )}
                 
-                {/* Afficher les secteurs pré-configurés par le TL */}
-                {profileInfo.sectorsPreConfigured && selectedDepartments.length > 0 && (
-                  <View style={[styles.configuredItem, { flexDirection: 'column', alignItems: 'flex-start' }]}>
-                    <Text style={styles.configuredLabel}>Secteurs d'intervention :</Text>
-                    <View style={styles.preConfiguredSectors}>
-                      {selectedDepartments.map((code) => {
-                        const dept = FRENCH_DEPARTMENTS.find(d => d.code === code);
-                        return (
-                          <View key={code} style={styles.preConfiguredSectorTag}>
-                            <Text style={styles.preConfiguredSectorText}>
-                              📍 {code} - {dept?.name || code}
-                            </Text>
-                          </View>
-                        );
-                      })}
-                    </View>
-                  </View>
-                )}
               </View>
             )}
           </View>
         )}
 
-        {/* Step 2: Départements - Seulement si NON pré-configurés par le TL */}
-        {step === 2 && !profileInfo.sectorsPreConfigured && (
+        {/* Step 2: Secteurs (définis par l'admin) */}
+        {step === 2 && hasSectorsStep && (
           <View style={styles.stepContainer}>
             <Text style={styles.stepTitle}>📍 Secteurs d'intervention</Text>
             <Text style={styles.stepDescription}>
-              Sélectionnez les départements où vous intervenez
+              Sélectionnez les secteurs définis par votre administrateur
             </Text>
 
             <View style={styles.inputGroup}>
@@ -467,6 +470,43 @@ export default function ProfileCompletionScreen({ navigation, onComplete }: Prop
                 </Text>
               )}
             </View>
+          </View>
+        )}
+
+        {/* Step 3: Activités (définies par l'admin) */}
+        {step === 3 && hasActivitiesStep && (
+          <View style={styles.stepContainer}>
+            <Text style={styles.stepTitle}>🔧 Activités</Text>
+            <Text style={styles.stepDescription}>
+              Sélectionnez les activités définies par votre administrateur
+            </Text>
+            <View style={styles.departmentsList}>
+              {activities.map((act) => (
+                <TouchableOpacity
+                  key={act.id}
+                  style={[
+                    styles.departmentItem,
+                    selectedActivityIds.includes(act.id) && styles.departmentItemSelected,
+                  ]}
+                  onPress={() => toggleActivity(act.id)}
+                >
+                  <Text
+                    style={[
+                      styles.departmentText,
+                      selectedActivityIds.includes(act.id) && styles.departmentTextSelected,
+                    ]}
+                  >
+                    {act.name}
+                  </Text>
+                  {selectedActivityIds.includes(act.id) && (
+                    <Text style={styles.departmentCheck}>✓</Text>
+                  )}
+                </TouchableOpacity>
+              ))}
+            </View>
+            {activities.length === 0 && (
+              <Text style={styles.moreText}>Chargement des activités...</Text>
+            )}
           </View>
         )}
 

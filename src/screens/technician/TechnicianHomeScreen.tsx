@@ -20,7 +20,8 @@ interface Intervention {
   status: string;
   clientName: string;
   clientAddress?: string;
-  scheduledDate: string;
+  scheduledDate?: string;
+  scheduledAt?: string;
   description?: string;
   estimatedAmount?: number;
   // Adresse peut être un objet ou une chaîne
@@ -72,6 +73,7 @@ export default function TechnicianHomeScreen({ navigation }: any) {
   const [isAvailable, setIsAvailable] = useState(true);
   const [showHistory, setShowHistory] = useState(false);
   const [technicianProfile, setTechnicianProfile] = useState<any>(null);
+  const [unreadMessagesCount, setUnreadMessagesCount] = useState(0);
 
   const loadData = useCallback(async () => {
     try {
@@ -80,7 +82,7 @@ export default function TechnicianHomeScreen({ navigation }: any) {
         // Profil technicien pour obtenir le % de commission
         api.getTechnicianProfile().catch(() => null),
         // Interventions disponibles dans mon secteur (status pending/notified)
-        api.getInterventions({ status: 'pending' }).catch(() => []),
+        api.getInterventions({ status: ['pending', 'notified'] }).catch(() => []),
         // Mes interventions acceptées
         api.getInterventions({ status: 'accepted' }).catch(() => []),
         // En route
@@ -139,22 +141,32 @@ export default function TechnicianHomeScreen({ navigation }: any) {
       
       const allData = [...uniqueInterventions, ...uniqueHistory];
       
-      const todayCount = allData.filter((i: any) => 
-        i.scheduledDate && new Date(i.scheduledDate).toDateString() === today
-      ).length;
-      const weekCount = allData.filter((i: any) => 
-        i.scheduledDate && new Date(i.scheduledDate) >= weekAgo
-      ).length;
+      const getDate = (i: any) => i.scheduledAt || i.scheduledDate || i.scheduled_at;
+      const todayCount = allData.filter((i: any) => {
+        const d = getDate(i);
+        return d && new Date(d).toDateString() === today;
+      }).length;
+      const weekCount = allData.filter((i: any) => {
+        const d = getDate(i);
+        return d && new Date(d) >= weekAgo;
+      }).length;
       const pendingCount = uniqueInterventions.filter((i: any) => 
         ['pending', 'notified', 'assigned', 'accepted'].includes(i.status)
       ).length;
       
       // Calculer les VRAIS gains du technicien (montant × commission%)
       const totalRevenue = uniqueHistory
-        .reduce((sum: number, i: any) => sum + (parseFloat(i.amountTTC) || parseFloat(i.amountRealized) || 0), 0);
+        .reduce((sum: number, i: any) => {
+          const amt = parseFloat(i.amountTTC) || parseFloat(i.amount_ttc) || parseFloat(i.amountTtc) || parseFloat(i.amountRealized) || parseFloat(i.amount_realized) || 0;
+          return sum + (isNaN(amt) ? 0 : amt);
+        }, 0);
       const totalEarned = totalRevenue * (commissionRate / 100);
       
       setStats({ today: todayCount, week: weekCount, pending: pendingCount, revenue: totalRevenue, totalEarned, commissionRate });
+
+      // Charger le nombre de messages non lus
+      const unreadCount = await api.getUnreadMessagesCount();
+      setUnreadMessagesCount(unreadCount);
     } catch (error) {
       console.error('Erreur chargement interventions:', error);
     }
@@ -264,15 +276,36 @@ export default function TechnicianHomeScreen({ navigation }: any) {
             <Text style={styles.greeting}>Bonjour,</Text>
             <Text style={styles.userName}>{user?.name || 'Technicien'}</Text>
           </View>
-          <TouchableOpacity
-            style={[styles.availabilityBadge, !isAvailable && styles.unavailableBadge]}
-            onPress={toggleAvailability}
-          >
+          <View style={styles.headerRightActions}>
+            <TouchableOpacity
+              style={styles.settingsButton}
+              onPress={() => navigation.navigate('Messaging')}
+            >
+              <Text style={styles.settingsButtonText}>💬</Text>
+              {unreadMessagesCount > 0 && (
+                <View style={styles.messageBadge}>
+                  <Text style={styles.messageBadgeText}>
+                    {unreadMessagesCount > 99 ? '99+' : unreadMessagesCount}
+                  </Text>
+                </View>
+              )}
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={styles.settingsButton}
+              onPress={() => navigation.navigate('TechnicianSettings')}
+            >
+              <Text style={styles.settingsButtonText}>⚙️</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={[styles.availabilityBadge, !isAvailable && styles.unavailableBadge]}
+              onPress={toggleAvailability}
+            >
             <View style={[styles.availabilityDot, !isAvailable && styles.unavailableDot]} />
             <Text style={[styles.availabilityText, !isAvailable && styles.unavailableText]}>
               {isAvailable ? 'Disponible' : 'Indisponible'}
             </Text>
           </TouchableOpacity>
+          </View>
         </View>
         
         {/* Commission Badge */}
@@ -309,6 +342,21 @@ export default function TechnicianHomeScreen({ navigation }: any) {
         </View>
       </View>
 
+      {/* Accès rapide */}
+      <TouchableOpacity
+        style={styles.documentsShortcut}
+        onPress={() => navigation.navigate('MyDocuments')}
+      >
+        <View style={styles.documentsShortcutLeft}>
+          <Text style={styles.documentsShortcutIcon}>📋</Text>
+          <View>
+            <Text style={styles.documentsShortcutTitle}>Mes devis & factures</Text>
+            <Text style={styles.documentsShortcutSubtitle}>Historique de vos documents</Text>
+          </View>
+        </View>
+        <Text style={styles.documentsShortcutArrow}>›</Text>
+      </TouchableOpacity>
+
       {/* Nouvelles interventions */}
       {pendingInterventions.length > 0 && (
         <View style={styles.section}>
@@ -325,7 +373,7 @@ export default function TechnicianHomeScreen({ navigation }: any) {
                     {TYPE_LABELS[intervention.type] || intervention.type}
                   </Text>
                 </View>
-                <Text style={styles.interventionDate}>{formatDate(intervention.scheduledDate)}</Text>
+                <Text style={styles.interventionDate}>{formatDate(intervention.scheduledAt || intervention.scheduledDate || intervention.scheduled_at)}</Text>
               </View>
               {/* Pas de nom client avant acceptation (pending/notified) */}
               <View style={styles.addressRow}>
@@ -404,7 +452,7 @@ export default function TechnicianHomeScreen({ navigation }: any) {
                       {STATUS_LABELS[intervention.status]}
                     </Text>
                   </View>
-                  <Text style={styles.interventionDate}>{formatDate(intervention.scheduledDate)}</Text>
+                  <Text style={styles.interventionDate}>{formatDate(intervention.scheduledAt || intervention.scheduledDate || intervention.scheduled_at)}</Text>
                 </View>
                 <Text style={styles.clientName}>{intervention.clientName || intervention.client?.name || 'Client'}</Text>
                 <View style={styles.addressRow}>
@@ -462,7 +510,7 @@ export default function TechnicianHomeScreen({ navigation }: any) {
               
               {/* Liste des interventions terminées */}
               {completedInterventions.slice(0, 10).map((intervention) => {
-                const interventionAmount = intervention.amountTTC || intervention.amountRealized || 0;
+                const interventionAmount = parseFloat(intervention.amountTTC) || parseFloat(intervention.amount_ttc) || parseFloat(intervention.amountTtc) || parseFloat(intervention.amountRealized) || parseFloat(intervention.amount_realized) || 0;
                 const myEarnings = interventionAmount * (stats.commissionRate / 100);
                 
                 return (
@@ -476,7 +524,7 @@ export default function TechnicianHomeScreen({ navigation }: any) {
                         <Text style={styles.statusBadgeText}>✓ Terminée</Text>
                       </View>
                       <Text style={styles.interventionDate}>
-                        {intervention.completedAt ? formatDate(intervention.completedAt) : formatDate(intervention.scheduledDate)}
+                        {formatDate(intervention.completedAt || intervention.completed_at || intervention.scheduledAt || intervention.scheduledDate || intervention.scheduled_at)}
                       </Text>
                     </View>
                     <Text style={styles.clientName}>{intervention.clientName || intervention.client?.name || 'Client'}</Text>
@@ -533,6 +581,41 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'flex-start',
+  },
+  headerRightActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+  },
+  settingsButton: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: 'rgba(255,255,255,0.2)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    position: 'relative' as const,
+  },
+  settingsButtonText: {
+    fontSize: 20,
+  },
+  messageBadge: {
+    position: 'absolute' as const,
+    top: -4,
+    right: -4,
+    backgroundColor: '#ef4444',
+    minWidth: 18,
+    height: 18,
+    borderRadius: 9,
+    alignItems: 'center' as const,
+    justifyContent: 'center' as const,
+    borderWidth: 2,
+    borderColor: '#4f46e5',
+  },
+  messageBadgeText: {
+    color: '#fff',
+    fontSize: 10,
+    fontWeight: 'bold' as const,
   },
   greeting: {
     fontSize: 16,
@@ -915,5 +998,45 @@ const styles = StyleSheet.create({
     color: COLORS.textMuted,
     fontSize: 14,
     marginTop: 8,
+  },
+  documentsShortcut: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    backgroundColor: COLORS.card,
+    marginHorizontal: 16,
+    marginTop: 12,
+    padding: 16,
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: '#e0e7ff',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.05,
+    shadowRadius: 4,
+    elevation: 2,
+  },
+  documentsShortcutLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+  },
+  documentsShortcutIcon: {
+    fontSize: 28,
+  },
+  documentsShortcutTitle: {
+    fontSize: 15,
+    fontWeight: '600',
+    color: COLORS.text,
+  },
+  documentsShortcutSubtitle: {
+    fontSize: 12,
+    color: COLORS.textMuted,
+    marginTop: 2,
+  },
+  documentsShortcutArrow: {
+    fontSize: 24,
+    color: COLORS.textMuted,
+    fontWeight: '300',
   },
 });

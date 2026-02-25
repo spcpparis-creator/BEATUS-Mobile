@@ -90,7 +90,7 @@ export default function TechnicianEditScreen({ navigation, route }: Props) {
     technician.selectedDepartments || technician.selected_departments || []
   );
   const [selectedSpecialties, setSelectedSpecialties] = useState<string[]>(
-    technician.specialties || []
+    technician.specialties || technician.activityIds || technician.activity_ids || []
   );
 
   // Charger les activités du tenant
@@ -99,6 +99,22 @@ export default function TechnicianEditScreen({ navigation, route }: Props) {
       try {
         const data = await api.getActivities();
         setActivities(data);
+        
+        // Normaliser selectedSpecialties : convertir les noms en IDs si nécessaire
+        // (Fix: activity_ids est uuid[] en BDD, on doit stocker des UUIDs pas des noms)
+        if (data && data.length > 0) {
+          setSelectedSpecialties(prev => {
+            const nameToId: Record<string, string> = {};
+            (data as Activity[]).forEach(a => { nameToId[a.name] = a.id; });
+            
+            return prev.map(val => {
+              // Si c'est déjà un UUID (contient des tirets), garder tel quel
+              if (val.includes('-')) return val;
+              // Sinon c'est un nom, convertir en ID
+              return nameToId[val] || val;
+            });
+          });
+        }
       } catch (error) {
         console.error('Erreur chargement activités:', error);
         // En cas d'erreur, ne pas bloquer l'utilisateur
@@ -150,6 +166,7 @@ export default function TechnicianEditScreen({ navigation, route }: Props) {
         commissionPercentage: commission,
         selectedDepartments,
         specialties: selectedSpecialties,
+        activityIds: selectedSpecialties,
       });
       
       Alert.alert('✅ Succès', 'Les paramètres du technicien ont été mis à jour', [
@@ -342,7 +359,7 @@ export default function TechnicianEditScreen({ navigation, route }: Props) {
                       styles.specialtyButton,
                       isSelected && styles.specialtyButtonActive
                     ]}
-                    onPress={() => toggleSpecialty(activity.name)}
+                    onPress={() => toggleSpecialty(activity.id)}
                     activeOpacity={0.7}
                   >
                     <Text style={styles.specialtyIcon}>{getActivityIcon(activity.name)}</Text>

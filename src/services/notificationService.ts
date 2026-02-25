@@ -16,6 +16,7 @@ import Constants from 'expo-constants';
 import api from './api';
 
 // Comportement des notifications (foreground)
+// Titre, corps, son, badge, bannière - tous activés pour affichage natif
 Notifications.setNotificationHandler({
   handleNotification: async () => ({
     shouldPlaySound: true,
@@ -28,6 +29,7 @@ Notifications.setNotificationHandler({
 
 /**
  * Configure le canal de notifications Android (priorité max pour écran verrouillé)
+ * Icône: app icon par défaut. Couleur: configurée dans app.json (notification.color)
  */
 async function setupAndroidChannel() {
   if (Platform.OS === 'android') {

@@ -7,7 +7,6 @@ import {
   TouchableOpacity,
   RefreshControl,
   ActivityIndicator,
-  Alert,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { COLORS, API_BASE_URL } from '../../config/api';
@@ -38,13 +37,13 @@ export default function MyDocumentsScreen({ navigation }: Props) {
     try {
       const token = await SecureStore.getItemAsync('authToken');
       
-      // Charger les devis
-      const quotesResponse = await fetch(`${API_BASE_URL}/quotes/my`, {
+      // Charger les devis (GET /api/quotes filtre automatiquement par rôle côté backend)
+      const quotesResponse = await fetch(`${API_BASE_URL}/quotes`, {
         headers: { 'Authorization': `Bearer ${token}` },
       }).catch(() => ({ ok: false }));
       
-      // Charger les factures
-      const invoicesResponse = await fetch(`${API_BASE_URL}/invoices/my`, {
+      // Charger les factures (GET /api/invoices filtre automatiquement par rôle côté backend)
+      const invoicesResponse = await fetch(`${API_BASE_URL}/invoices`, {
         headers: { 'Authorization': `Bearer ${token}` },
       }).catch(() => ({ ok: false }));
 
@@ -226,10 +225,13 @@ export default function MyDocumentsScreen({ navigation }: Props) {
               <TouchableOpacity
                 key={`${doc.type}-${doc.id}`}
                 style={styles.documentCard}
-                onPress={() => Alert.alert(
-                  doc.type === 'quote' ? 'Devis' : 'Facture',
-                  `${doc.reference}\nClient: ${doc.clientName}\nMontant: ${formatCurrency(doc.amountTTC || doc.amountHT * 1.2)}`
-                )}
+                onPress={() => {
+                  if (doc.type === 'quote') {
+                    navigation.navigate('QuoteDetail', { quoteId: doc.id });
+                  } else {
+                    navigation.navigate('InvoiceDetail', { invoiceId: doc.id });
+                  }
+                }}
               >
                 <View style={styles.documentHeader}>
                   <View style={styles.documentTypeContainer}>
@@ -243,16 +245,28 @@ export default function MyDocumentsScreen({ navigation }: Props) {
                       </Text>
                     </View>
                   </View>
-                  <View style={[styles.statusBadge, { backgroundColor: statusStyle.bg }]}>
-                    <Text style={[styles.statusText, { color: statusStyle.text }]}>
-                      {getStatusLabel(doc.status)}
-                    </Text>
+                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
+                    <View style={[styles.statusBadge, { backgroundColor: statusStyle.bg }]}>
+                      <Text style={[styles.statusText, { color: statusStyle.text }]}>
+                        {getStatusLabel(doc.status)}
+                      </Text>
+                    </View>
+                    {(doc.depositPaid || doc.deposit_paid) && (
+                      <View style={[styles.statusBadge, { backgroundColor: '#d1fae5' }]}>
+                        <Text style={[styles.statusText, { color: '#059669' }]}>Acompte ✓</Text>
+                      </View>
+                    )}
+                    {(doc.balancePaid || doc.balance_paid) && doc.status === 'paid' && (
+                      <View style={[styles.statusBadge, { backgroundColor: '#d1fae5' }]}>
+                        <Text style={[styles.statusText, { color: '#059669' }]}>Payée ✓</Text>
+                      </View>
+                    )}
                   </View>
                 </View>
                 
                 <View style={styles.documentBody}>
-                  <Text style={styles.documentClient}>👤 {doc.clientName}</Text>
-                  <Text style={styles.documentDate}>📅 {formatDate(doc.createdAt)}</Text>
+                  <Text style={styles.documentClient}>👤 {doc.clientName || doc.client_name || 'Client'}</Text>
+                  <Text style={styles.documentDate}>📅 {formatDate(doc.createdAt || doc.created_at)}</Text>
                 </View>
 
                 <View style={styles.documentFooter}>
@@ -261,7 +275,7 @@ export default function MyDocumentsScreen({ navigation }: Props) {
                     styles.documentAmount,
                     { color: doc.type === 'quote' ? '#b45309' : '#16a34a' }
                   ]}>
-                    {formatCurrency(doc.amountTTC || doc.amountHT * 1.2)}
+                    {formatCurrency(doc.amountTTC || doc.amount_ttc || doc.amountTtc || (doc.amountHT || doc.amount_ht || 0) * 1.2)}
                   </Text>
                 </View>
               </TouchableOpacity>

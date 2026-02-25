@@ -15,7 +15,8 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useAuth } from '../../contexts/AuthContext';
 import api from '../../services/api';
-import { COLORS, STATUS_COLORS, STATUS_LABELS, TYPE_LABELS } from '../../config/api';
+import { COLORS, STATUS_COLORS, STATUS_LABELS, TYPE_LABELS, API_BASE_URL } from '../../config/api';
+import * as SecureStore from 'expo-secure-store';
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
 
@@ -44,6 +45,7 @@ interface Intervention {
   address?: { city?: string; street?: string };
   amountTTC?: number;
   scheduledDate?: string;
+  scheduledAt?: string;
   technicianId?: string;
 }
 
@@ -77,6 +79,7 @@ interface TeamLeader {
   defaultTechnicianCommission?: number;
   billingType?: string;
   selectedDepartments?: string[];
+  activityIds?: string[];
 }
 
 type MainView = 'stats' | 'technicians' | 'settings';
@@ -104,6 +107,9 @@ export default function TeamLeaderHomeScreen({ navigation }: any) {
   const [commissionValue, setCommissionValue] = useState('');
   const [selectedTechnician, setSelectedTechnician] = useState<Technician | null>(null);
   const [savingCommission, setSavingCommission] = useState(false);
+  const [activityNames, setActivityNames] = useState<Record<string, string>>({});
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [unreadMessagesCount, setUnreadMessagesCount] = useState(0);
   
   // Modales pour les cartes de stats
   const [showTechniciansModal, setShowTechniciansModal] = useState(false);
@@ -128,25 +134,98 @@ export default function TeamLeaderHomeScreen({ navigation }: any) {
   }, [interventions, validatedTechnicians]);
 
   const loadData = useCallback(async () => {
+    setLoadError(null);
     try {
-      // Charger le profil team leader
-      const profileData = await api.getTeamLeaderMe();
-      const tl = profileData.data || profileData;
+      // 1. Charger le profil TL en premier (fetch direct pour éviter perte de données)
+      const token = await SecureStore.getItemAsync('authToken');
+      const profileRes = await fetch(`${API_BASE_URL}/team-leaders/me`, {
+        headers: {
+          'Content-Type': 'application/json',
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+      });
+      const profileRaw = await profileRes.json().catch(() => ({}));
+      if (!profileRes.ok) {
+        const errMsg = profileRaw?.error || profileRaw?.message || profileRaw?.detail || `Erreur serveur ${profileRes.status}`;
+        const details = profileRaw?.details || profileRaw?.steps;
+        const fullMsg = details ? (typeof details === 'object' ? `${errMsg} | ${JSON.stringify(details)}` : `${errMsg}: ${details}`) : errMsg;
+        logErrorDetailed({
+          file: 'src/screens/teamleader/TeamLeaderHomeScreen.tsx',
+          line: 146,
+          function: 'loadData',
+          code: 'if (!profileRes.ok) { ... throw new Error(fullMsg); }',
+          message: `API GET /team-leaders/me → ${profileRes.status} ${profileRes.statusText}`,
+          context: {
+            endpoint: `${API_BASE_URL}/team-leaders/me`,
+            method: 'GET',
+            status: profileRes.status,
+            statusText: profileRes.statusText,
+            responseBody: profileRaw,
+            responseHeaders: Object.fromEntries(profileRes.headers.entries()),
+            tokenPresent: !!token,
+          },
+        });
+        // Si 500 sans détails, appeler le debug pour obtenir le diagnostic
+        if (profileRes.status === 500 && !profileRaw?.details && token) {
+          try {
+            const debugRes = await fetch(`${API_BASE_URL}/team-leaders/me/debug`, {
+              headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+            });
+            const debugRaw = await debugRes.json().catch(() => ({}));
+            if (debugRaw?.steps || debugRaw?.error) {
+              logErrorDetailed({
+                file: 'src/screens/teamleader/TeamLeaderHomeScreen.tsx',
+                line: 168,
+                function: 'loadData',
+                code: 'fetch /team-leaders/me/debug',
+                message: 'Diagnostic backend 500',
+                context: { debugRaw },
+              });
+              const debugMsg = debugRaw?.error ? `${debugRaw.error} | ${JSON.stringify(debugRaw.steps || {})}` : `${errMsg} | ${JSON.stringify(debugRaw?.steps || {})}`;
+              throw new Error(debugMsg);
+            }
+          } catch (debugErr: any) {
+            // Rethrow si on a reçu une réponse debug (erreur utile plutôt que "Erreur serveur")
+            if (debugErr?.message && !debugErr.message.startsWith('Erreur serveur')) throw debugErr;
+          }
+        }
+        throw new Error(fullMsg);
+      }
+      const raw = profileRaw?.data ?? profileRaw?.teamLeader ?? profileRaw;
+      if (!raw) throw new Error('Réponse invalide');
+      const inv = raw.invitation ?? raw.invitationConfig ?? raw.invitation_config ?? {};
+      const tl = {
+        ...raw,
+        commissionFromAdmin: raw.commissionFromAdmin ?? raw.commission_from_admin ?? inv.commissionFromAdmin ?? inv.commission_from_admin ?? raw.commission ?? inv.commission ?? raw.commissionPercentage ?? inv.commissionPercentage,
+        billingType: raw.billingType ?? raw.billing_type ?? inv.billingType ?? inv.billing_type,
+        defaultTechnicianCommission: raw.defaultTechnicianCommission ?? raw.default_technician_commission ?? inv.defaultTechnicianCommission ?? inv.default_technician_commission,
+        selectedDepartments: raw.selectedDepartments ?? raw.selected_departments ?? inv.selectedDepartments ?? inv.selected_departments ?? [],
+        activityIds: raw.activityIds ?? raw.activity_ids ?? inv.activityIds ?? inv.activity_ids ?? [],
+        activities: raw.activities ?? inv.activities ?? [],
+      };
       setTeamLeader(tl);
 
-      // Charger les données en parallèle
+      // 2. Charger les données en parallèle
       // Ne pas passer tl.id pour utiliser /me/technicians (utilise l'utilisateur connecté)
-      const [techData, pendingData, completedData, invoicedData, paidData, assignmentsData, statsData] = await Promise.all([
+      const [techData, pendingData, completedData, invoicedData, paidData, assignmentsData, statsData, activitiesData] = await Promise.all([
         api.getTeamLeaderTechnicians().catch((err) => {
-          console.error('Erreur chargement techniciens:', err);
+          logErrorDetailed({
+            file: 'src/screens/teamleader/TeamLeaderHomeScreen.tsx',
+            line: 196,
+            function: 'loadData',
+            code: 'api.getTeamLeaderTechnicians()',
+            message: String(err instanceof Error ? err.message : err),
+            error: err,
+          });
           return [];
         }),
-        api.getInterventions({ status: 'pending' }).catch(() => []),
+        api.getInterventions({ status: ['pending', 'notified'] }).catch(() => []),
         api.getInterventions({ status: 'completed' }).catch(() => []),
         api.getInterventions({ status: 'invoiced' }).catch(() => []),
         api.getInterventions({ status: 'paid' }).catch(() => []),
         api.getSectorAssignments().catch(() => []),
-        api.getTeamLeaderStats(tl.id).catch(() => null),
+        api.getTeamLeaderStats(tl?.id).catch(() => null),
+        api.getActivities().catch(() => []),
       ]);
 
       // Normaliser les réponses (certaines APIs retournent { data: [...] })
@@ -181,6 +260,13 @@ export default function TeamLeaderHomeScreen({ navigation }: any) {
       setTechnicians(Array.isArray(techData) ? techData : (techData?.data || []));
       setInterventions(interventionsData);
       setAssignments(Array.isArray(assignmentsData) ? assignmentsData : []);
+      // Map activity IDs to names: priorité au tableau activities fourni par GET /team-leaders/me
+      const actsFromTl = Array.isArray(tl?.activities) ? tl.activities : [];
+      const actsFromApi = Array.isArray(activitiesData) ? activitiesData : [];
+      const acts = actsFromTl.length > 0 ? actsFromTl : actsFromApi;
+      const namesMap: Record<string, string> = {};
+      acts.forEach((a: { id: string; name: string }) => { if (a?.id && a?.name) namesMap[a.id] = a.name; });
+      setActivityNames(namesMap);
 
       // Filtrer les interventions disponibles
       const available = toArray(pendingData).filter((i: Intervention) =>
@@ -190,7 +276,7 @@ export default function TeamLeaderHomeScreen({ navigation }: any) {
       
       // Mes interventions en cours (acceptées par le TL lui-même)
       const myActive = [...toArray(acceptedData), ...toArray(enRouteData), ...toArray(onSiteData)].filter((i: Intervention) =>
-        i.teamLeaderId === tl.id || i.technicianId === tl.userId
+        i.teamLeaderId === tl?.id || i.technicianId === tl?.userId
       );
       setMyActiveInterventions(myActive);
 
@@ -243,12 +329,41 @@ export default function TeamLeaderHomeScreen({ navigation }: any) {
         console.log(`[TL Stats Debug] Tech ${intervention.technicianId}: ${amount} * ${techCommission}% = ${techEarning}`);
       });
 
-      const commissionRate = tl.commissionFromAdmin != null ? parseFloat(tl.commissionFromAdmin) : 30;
+      const commissionRate = tl.commissionFromAdmin != null ? parseFloat(String(tl.commissionFromAdmin)) : 0;
       const netProfit = totalRevenue * (commissionRate / 100) - totalToPayTechnicians;
 
       console.log(`[TL Stats] CA: ${totalRevenue}, Commission TL: ${commissionRate}%, À verser techs: ${totalToPayTechnicians}, Profit: ${netProfit}`);
 
-      const statsFromApi = statsData && typeof statsData === 'object' ? statsData : {};
+      // Calculer les stats par technicien LOCALEMENT (au lieu de l'API qui renvoie 0)
+      const techStatsMap = new Map<string, { id: string; name: string; interventionsCount: number; revenue: number; commissionPercentage: number; toPay: number }>();
+      
+      // Initialiser chaque technicien
+      techArray.forEach((tech: any) => {
+        techStatsMap.set(tech.id, {
+          id: tech.id,
+          name: tech.name || `${tech.firstName || ''} ${tech.lastName || ''}`.trim() || 'Technicien',
+          interventionsCount: 0,
+          revenue: 0,
+          commissionPercentage: parseFloat(tech.commissionPercentage) || 30,
+          toPay: 0,
+        });
+      });
+
+      // Agréger les interventions terminées par technicien
+      completedInterventions.forEach((intervention: any) => {
+        const techId = intervention.technicianId;
+        const amount = parseFloat(intervention.amountTTC) || parseFloat(intervention.amountRealized) || 0;
+        const existing = techStatsMap.get(techId);
+        if (existing) {
+          existing.interventionsCount += 1;
+          existing.revenue += amount;
+          existing.toPay = existing.revenue * (existing.commissionPercentage / 100);
+        }
+      });
+
+      const localTechnicianStats = Array.from(techStatsMap.values());
+      console.log(`[TL Stats] technicianStats calculées localement:`, JSON.stringify(localTechnicianStats));
+
       setStats({
         totalTechnicians: (techArray || []).length,
         completedInterventions: completedCount,
@@ -256,12 +371,41 @@ export default function TeamLeaderHomeScreen({ navigation }: any) {
         totalRevenue,
         netProfit: Math.max(0, netProfit),
         totalToPayTechnicians,
-        commissionFromAdmin: commissionRate,
+        commissionFromAdmin: tl.commissionFromAdmin != null ? parseFloat(String(tl.commissionFromAdmin)) : undefined,
         billingType: tl.billingType,
-        technicianStats: Array.isArray(statsFromApi.technicianStats) ? statsFromApi.technicianStats : [],
+        technicianStats: localTechnicianStats,
       });
-    } catch (error) {
-      console.error('Erreur chargement données:', error);
+
+      // Charger le nombre de messages non lus
+      try {
+        const convRes = await fetch(`${API_BASE_URL}/messaging/conversations`, {
+          headers: {
+            'Content-Type': 'application/json',
+            ...(token ? { Authorization: `Bearer ${token}` } : {}),
+          },
+        });
+        if (convRes.ok) {
+          const convData = await convRes.json();
+          const totalUnread = Array.isArray(convData)
+            ? convData.reduce((sum: number, c: any) => sum + (c.unread_count || 0), 0)
+            : 0;
+          setUnreadMessagesCount(totalUnread);
+        }
+      } catch (msgErr) {
+        console.log('[TL Dashboard] Erreur chargement messages non lus:', msgErr);
+      }
+    } catch (error: any) {
+      const msg = error?.message || error?.response?.data?.error || error?.response?.data?.details || 'Erreur de chargement';
+      logErrorDetailed({
+        file: 'src/screens/teamleader/TeamLeaderHomeScreen.tsx',
+        line: 327,
+        function: 'loadData',
+        code: 'try { ... loadData ... } catch',
+        message: msg,
+        error,
+        context: { loadError: msg },
+      });
+      setLoadError(msg);
     } finally {
       setLoading(false);
     }
@@ -302,6 +446,15 @@ export default function TeamLeaderHomeScreen({ navigation }: any) {
       navigation.navigate('InterventionDetail', { interventionId });
       loadData();
     } catch (error: any) {
+      logErrorDetailed({
+        file: 'src/screens/teamleader/TeamLeaderHomeScreen.tsx',
+        line: 378,
+        function: 'handleAcceptIntervention',
+        code: 'api.acceptIntervention(interventionId)',
+        message: String(error?.message || 'Impossible d\'accepter'),
+        error,
+        context: { interventionId },
+      });
       Alert.alert('Erreur', error.message || 'Impossible d\'accepter');
     }
   };
@@ -320,6 +473,15 @@ export default function TeamLeaderHomeScreen({ navigation }: any) {
       setEditingCommission(null);
       loadData();
     } catch (error: any) {
+      logErrorDetailed({
+        file: 'src/screens/teamleader/TeamLeaderHomeScreen.tsx',
+        line: 400,
+        function: 'handleSaveCommission',
+        code: 'api.updateTechnicianCommission(teamLeader!.id, technicianId, value)',
+        message: String(error?.message || 'Impossible de mettre à jour'),
+        error,
+        context: { technicianId, value },
+      });
       Alert.alert('Erreur', error.message || 'Impossible de mettre à jour');
     } finally {
       setSavingCommission(false);
@@ -337,8 +499,38 @@ export default function TeamLeaderHomeScreen({ navigation }: any) {
     );
   }
 
+  // Écran d'erreur plein quand le chargement initial échoue (pas de profil TL)
+  if (loadError && !teamLeader) {
+    return (
+      <SafeAreaView style={styles.container} edges={['top']}>
+        <View style={styles.errorFullScreen}>
+          <Text style={styles.errorFullScreenIcon}>⚠️</Text>
+          <Text style={styles.errorFullScreenTitle}>Erreur de chargement</Text>
+          <Text style={styles.errorFullScreenMessage} numberOfLines={4}>{loadError}</Text>
+          <TouchableOpacity
+            style={styles.errorFullScreenRetryButton}
+            onPress={() => { setLoadError(null); setLoading(true); loadData(); }}
+          >
+            <Text style={styles.errorFullScreenRetryText}>Réessayer</Text>
+          </TouchableOpacity>
+          <TouchableOpacity style={styles.errorFullScreenLogoutButton} onPress={logout}>
+            <Text style={styles.errorFullScreenLogoutText}>Retour à la connexion</Text>
+          </TouchableOpacity>
+        </View>
+      </SafeAreaView>
+    );
+  }
+
   return (
     <SafeAreaView style={styles.container} edges={['top']}>
+      {loadError && (
+        <View style={styles.errorBanner}>
+          <Text style={styles.errorBannerText} numberOfLines={2}>⚠️ {loadError}</Text>
+          <TouchableOpacity style={styles.retryButton} onPress={() => { setLoadError(null); loadData(); }}>
+            <Text style={styles.retryButtonText}>Réessayer</Text>
+          </TouchableOpacity>
+        </View>
+      )}
       {/* ===== VUE STATS ===== */}
       {mainView === 'stats' && (
         <ScrollView
@@ -407,7 +599,7 @@ export default function TeamLeaderHomeScreen({ navigation }: any) {
                   {formatCurrency(stats.totalRevenue || 0)}
                 </Text>
                 <Text style={styles.statLabel}>Chiffre d'affaires</Text>
-                <Text style={styles.statSublabel}>Commission: {stats.commissionFromAdmin ?? 30}%</Text>
+                <Text style={styles.statSublabel}>Commission: {stats.commissionFromAdmin != null ? `${stats.commissionFromAdmin}%` : '—'}</Text>
                 <Text style={styles.tapHint}>Appuyer pour détails</Text>
               </TouchableOpacity>
               <TouchableOpacity 
@@ -595,7 +787,7 @@ export default function TeamLeaderHomeScreen({ navigation }: any) {
                 </View>
                 
                 <View style={styles.paymentSummaryRow}>
-                  <Text style={styles.paymentLabel}>Ma commission ({stats.commissionFromAdmin ?? 30}%)</Text>
+                  <Text style={styles.paymentLabel}>Ma commission ({stats.commissionFromAdmin != null ? `${stats.commissionFromAdmin}%` : '—'})</Text>
                   <Text style={[styles.paymentValue, styles.greenText]}>{formatCurrency(stats.netProfit || 0)}</Text>
                 </View>
                 
@@ -820,6 +1012,11 @@ export default function TeamLeaderHomeScreen({ navigation }: any) {
           </View>
 
           <View style={styles.content}>
+            {/* Ma configuration - valeurs définies par l'admin lors de la génération du code d'invitation */}
+            <View style={styles.invitationConfigHeader}>
+              <Text style={styles.invitationConfigTitle}>📋 Ma configuration</Text>
+            </View>
+
             {/* Profil */}
             <View style={styles.settingsCard}>
               <View style={styles.profileSection}>
@@ -849,7 +1046,7 @@ export default function TeamLeaderHomeScreen({ navigation }: any) {
                   styles.commissionValue,
                   { color: teamLeader?.billingType === 'self' ? '#16a34a' : '#2563eb' }
                 ]}>
-                  {teamLeader?.commissionFromAdmin ?? 30}%
+                  {teamLeader?.commissionFromAdmin != null ? `${teamLeader.commissionFromAdmin}%` : '—'}
                 </Text>
                 <Text style={[
                   styles.commissionDescription,
@@ -861,22 +1058,30 @@ export default function TeamLeaderHomeScreen({ navigation }: any) {
                   }
                 </Text>
               </View>
-              {teamLeader?.billingType === 'self' ? (
+              {teamLeader?.billingType === 'self' && teamLeader?.commissionFromAdmin != null ? (
                 <Text style={styles.commissionExample}>
-                  💡 Ex: Facture 1000€ HT, Matériel 200€ → Vous recevez {((1000 - 200) * (teamLeader?.commissionFromAdmin ?? 50) / 100).toFixed(0)}€
+                  💡 Ex: Facture 1000€ HT, Matériel 200€ → Vous recevez {((1000 - 200) * (teamLeader.commissionFromAdmin) / 100).toFixed(0)}€
                 </Text>
-              ) : (
+              ) : teamLeader?.billingType !== 'self' && teamLeader?.commissionFromAdmin != null ? (
                 <Text style={styles.commissionExample}>
-                  💡 Ex: Facture 1000€ HT → Vous recevez {(1000 * (teamLeader?.commissionFromAdmin ?? 30) / 100).toFixed(0)}€
+                  💡 Ex: Facture 1000€ HT → Vous recevez {(1000 * (teamLeader.commissionFromAdmin) / 100).toFixed(0)}€
                 </Text>
-              )}
+              ) : null}
             </View>
 
             {/* Commission techniciens */}
             <View style={styles.settingsCard}>
               <Text style={styles.settingsLabel}>Commission par défaut pour techniciens</Text>
-              <Text style={styles.settingsValue}>
-                {teamLeader?.defaultTechnicianCommission || 30}% (modifiable par technicien)
+              <View style={[styles.commissionInfoCard, { backgroundColor: '#f0fdf4' }]}>
+                <Text style={[styles.commissionValue, { color: '#16a34a' }]}>
+                  {teamLeader?.defaultTechnicianCommission != null ? `${teamLeader.defaultTechnicianCommission}%` : '20%'}
+                </Text>
+                <Text style={[styles.commissionDescription, { color: '#15803d' }]}>
+                  sur chaque intervention terminée
+                </Text>
+              </View>
+              <Text style={styles.commissionExample}>
+                💡 Modifiable par technicien lors de la génération du code d'invitation
               </Text>
             </View>
 
@@ -894,16 +1099,18 @@ export default function TeamLeaderHomeScreen({ navigation }: any) {
                   ]}>
                     {teamLeader?.billingType === 'self' 
                       ? '💼 Auto-facturation'
-                      : '🏢 Facturation SPCP'
+                      : teamLeader?.billingType === 'platform'
+                      ? '🏢 Facturation plateforme'
+                      : teamLeader?.billingType === 'spcp'
+                      ? '🏢 Facturation SPCP'
+                      : '🏢 Facturation plateforme'
                     }
                   </Text>
                 </View>
                 <Text style={styles.billingTypeDescription}>
                   {teamLeader?.billingType === 'self' 
                     ? 'Vous facturez directement vos clients'
-                    : teamLeader?.billingType === 'spcp'
-                    ? 'SPCP facture le client pour vous'
-                    : 'SPCP facture le client pour vous (par défaut)'
+                    : 'La plateforme facture le client pour vous'
                   }
                 </Text>
               </View>
@@ -946,6 +1153,23 @@ export default function TeamLeaderHomeScreen({ navigation }: any) {
                     <Text style={styles.settingsCardActionTitle}>Signature email</Text>
                     <Text style={styles.settingsCardActionSubtitle}>
                       Personnalisez vos emails automatiques
+                    </Text>
+                  </View>
+                  <Text style={styles.settingsCardActionArrow}>›</Text>
+                </TouchableOpacity>
+
+                {/* Paiement SumUp */}
+                <TouchableOpacity 
+                  style={styles.settingsCardAction}
+                  onPress={() => navigation.navigate('SumUpSettings')}
+                >
+                  <View style={[styles.settingsCardActionIcon, { backgroundColor: '#e0f2fe' }]}>
+                    <Text style={styles.settingsCardActionEmoji}>💳</Text>
+                  </View>
+                  <View style={styles.settingsCardActionContent}>
+                    <Text style={styles.settingsCardActionTitle}>Paiement SumUp</Text>
+                    <Text style={styles.settingsCardActionSubtitle}>
+                      Liens de paiement dans vos devis et factures
                     </Text>
                   </View>
                   <Text style={styles.settingsCardActionArrow}>›</Text>
@@ -1007,30 +1231,15 @@ export default function TeamLeaderHomeScreen({ navigation }: any) {
                   <Text style={styles.settingsCardActionArrow}>›</Text>
                 </TouchableOpacity>
 
-                {/* Paramètres de facturation */}
-                <TouchableOpacity 
-                  style={styles.settingsCardAction}
-                  onPress={() => navigation.navigate('BillingSettings')}
-                >
-                  <View style={[styles.settingsCardActionIcon, { backgroundColor: '#fef3c7' }]}>
-                    <Text style={styles.settingsCardActionEmoji}>⚙️</Text>
-                  </View>
-                  <View style={styles.settingsCardActionContent}>
-                    <Text style={styles.settingsCardActionTitle}>Paramètres de facturation</Text>
-                    <Text style={styles.settingsCardActionSubtitle}>
-                      Mode de facturation, société, templates
-                    </Text>
-                  </View>
-                  <Text style={styles.settingsCardActionArrow}>›</Text>
-                </TouchableOpacity>
+                {/* Paramètres de facturation supprimé - intégré dans Personnalisation documents */}
               </>
             )}
 
-            {teamLeader?.billingType === 'spcp' && (
+            {teamLeader?.billingType !== 'self' && (
               <View style={styles.spcpInfoCard}>
-                <Text style={styles.spcpInfoTitle}>ℹ️ Facturation SPCP</Text>
+                <Text style={styles.spcpInfoTitle}>ℹ️ Facturation plateforme</Text>
                 <Text style={styles.spcpInfoText}>
-                  SPCP gère la facturation pour vous. Les devis et factures sont générés automatiquement.
+                  La plateforme gère la facturation pour vous. Les devis et factures sont générés automatiquement.
                 </Text>
               </View>
             )}
@@ -1057,7 +1266,7 @@ export default function TeamLeaderHomeScreen({ navigation }: any) {
               <Text style={styles.settingsCardActionArrow}>›</Text>
             </TouchableOpacity>
 
-            {/* Secteurs sélectionnés */}
+            {/* Secteurs sélectionnés (paramètres de la bulle verte - configurés par l'admin) */}
             <View style={styles.settingsCard}>
               <Text style={styles.settingsLabel}>Secteurs d'intervention</Text>
               <View style={styles.departmentsContainer}>
@@ -1068,6 +1277,23 @@ export default function TeamLeaderHomeScreen({ navigation }: any) {
                 ))}
                 {(!teamLeader?.selectedDepartments || teamLeader.selectedDepartments.length === 0) && (
                   <Text style={styles.noDepartments}>Aucun secteur sélectionné</Text>
+                )}
+              </View>
+            </View>
+
+            {/* Activités (paramètres de la bulle verte - configurées par l'admin) */}
+            <View style={styles.settingsCard}>
+              <Text style={styles.settingsLabel}>Activités / Spécialités</Text>
+              <View style={styles.departmentsContainer}>
+                {teamLeader?.activityIds?.map(id => (
+                  <View key={id} style={[styles.departmentBadge, styles.activityBadge]}>
+                    <Text style={styles.departmentText}>
+                      {activityNames[id] || id}
+                    </Text>
+                  </View>
+                ))}
+                {(!teamLeader?.activityIds || teamLeader.activityIds.length === 0) && (
+                  <Text style={styles.noDepartments}>Aucune activité sélectionnée</Text>
                 )}
               </View>
             </View>
@@ -1112,6 +1338,26 @@ export default function TeamLeaderHomeScreen({ navigation }: any) {
           </View>
           <Text style={[styles.bottomNavText, mainView === 'technicians' && styles.activeNavText]}>
             Techniciens
+          </Text>
+        </TouchableOpacity>
+        <TouchableOpacity
+          style={styles.bottomNavItem}
+          onPress={() => (navigation as any).navigate('Messaging')}
+        >
+          <View style={styles.bottomNavIconContainer}>
+            <Text style={[styles.bottomNavIcon]}>
+              💬
+            </Text>
+            {unreadMessagesCount > 0 && (
+              <View style={[styles.badge, { backgroundColor: '#ef4444' }]}>
+                <Text style={styles.badgeText}>
+                  {unreadMessagesCount > 99 ? '99+' : unreadMessagesCount}
+                </Text>
+              </View>
+            )}
+          </View>
+          <Text style={[styles.bottomNavText]}>
+            Messages
           </Text>
         </TouchableOpacity>
         <TouchableOpacity
@@ -1441,9 +1687,9 @@ export default function TeamLeaderHomeScreen({ navigation }: any) {
                   <Text style={styles.profitValue}>{formatCurrency(stats.totalRevenue || 0)}</Text>
                 </View>
                 <View style={styles.profitRow}>
-                  <Text style={styles.profitLabel}>Ma commission ({stats.commissionFromAdmin ?? 30}%)</Text>
+                  <Text style={styles.profitLabel}>Ma commission ({stats.commissionFromAdmin != null ? `${stats.commissionFromAdmin}%` : '—'})</Text>
                   <Text style={[styles.profitValue, styles.profitGreen]}>
-                    {formatCurrency((stats.totalRevenue || 0) * ((stats.commissionFromAdmin ?? 30) / 100))}
+                    {formatCurrency((stats.totalRevenue || 0) * ((stats.commissionFromAdmin ?? 0) / 100))}
                   </Text>
                 </View>
                 <View style={styles.profitDivider} />
@@ -1980,6 +2226,95 @@ const styles = StyleSheet.create({
     fontWeight: 'bold',
     color: COLORS.text,
   },
+  errorFullScreen: {
+    flex: 1,
+    padding: 24,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  errorFullScreenIcon: {
+    fontSize: 64,
+    marginBottom: 16,
+  },
+  errorFullScreenTitle: {
+    fontSize: 20,
+    fontWeight: 'bold',
+    color: COLORS.text,
+    marginBottom: 12,
+    textAlign: 'center',
+  },
+  errorFullScreenMessage: {
+    fontSize: 15,
+    color: COLORS.textMuted,
+    textAlign: 'center',
+    marginBottom: 24,
+    lineHeight: 22,
+  },
+  errorFullScreenRetryButton: {
+    backgroundColor: COLORS.primary,
+    paddingHorizontal: 32,
+    paddingVertical: 14,
+    borderRadius: 12,
+    marginBottom: 12,
+    minWidth: 200,
+    alignItems: 'center',
+  },
+  errorFullScreenRetryText: {
+    color: '#fff',
+    fontSize: 16,
+    fontWeight: '600',
+  },
+  errorFullScreenLogoutButton: {
+    paddingVertical: 12,
+  },
+  errorFullScreenLogoutText: {
+    color: COLORS.textMuted,
+    fontSize: 14,
+  },
+  errorBanner: {
+    backgroundColor: '#fee2e2',
+    marginHorizontal: 16,
+    marginTop: 16,
+    padding: 16,
+    borderRadius: 12,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    flexWrap: 'wrap',
+    gap: 12,
+  },
+  errorBannerText: {
+    flex: 1,
+    color: COLORS.danger,
+    fontSize: 14,
+    fontWeight: '500',
+  },
+  retryButton: {
+    backgroundColor: COLORS.danger,
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+    borderRadius: 8,
+  },
+  retryButtonText: {
+    color: '#fff',
+    fontSize: 14,
+    fontWeight: '600',
+  },
+  invitationConfigHeader: {
+    marginBottom: 16,
+    paddingHorizontal: 4,
+  },
+  invitationConfigTitle: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: COLORS.text,
+    marginBottom: 4,
+  },
+  invitationConfigSubtitle: {
+    fontSize: 13,
+    color: COLORS.textMuted,
+    lineHeight: 18,
+  },
   settingsCard: {
     backgroundColor: COLORS.card,
     borderRadius: 16,
@@ -2171,6 +2506,9 @@ const styles = StyleSheet.create({
     color: COLORS.primary,
     fontWeight: '500',
     fontSize: 13,
+  },
+  activityBadge: {
+    backgroundColor: '#f0fdf4',
   },
   noDepartments: {
     fontSize: 14,

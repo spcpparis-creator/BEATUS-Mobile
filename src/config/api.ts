@@ -1,6 +1,6 @@
 // Configuration API pour l'application mobile BEATUS
 // Utilise le même backend que l'application web
-export const API_BASE_URL = 'https://beatus-backend.deno.dev/api';
+export const API_BASE_URL = 'https://api.beatus-app.com/api';
 
 // Google OAuth Client ID - Utiliser le Client ID Web pour Expo Go
 // Pour Expo Go, on doit utiliser un Client ID de type "Web application"

@@ -54,9 +54,37 @@ export default function BillingSettingsScreen({ navigation }: Props) {
   const [paymentDelayDays, setPaymentDelayDays] = useState('30');
   const [legalMentions, setLegalMentions] = useState('');
 
+  const [isTechUnderTL, setIsTechUnderTL] = useState(false);
+
   useEffect(() => {
-    loadSettings();
+    checkAccessAndLoadSettings();
   }, []);
+
+  const checkAccessAndLoadSettings = async () => {
+    // Un tech sous un TL ne doit PAS voir cette page
+    // Il facture avec la société de son TL
+    try {
+      const me = await api.getMe();
+      const role = me?.role || '';
+      if (role === 'technician') {
+        let tlId = me?.teamLeaderId || me?.team_leader_id || '';
+        if (!tlId) {
+          try {
+            const techProfile = await api.getTechnicianProfile();
+            tlId = techProfile?.teamLeaderId || techProfile?.team_leader_id || '';
+          } catch (_) { /* ignore */ }
+        }
+        if (tlId) {
+          // Tech sous un TL → pas accès à cette page
+          setIsTechUnderTL(true);
+          setLoading(false);
+          return;
+        }
+      }
+    } catch (_) { /* ignore */ }
+    
+    await loadSettings();
+  };
 
   const loadSettings = async () => {
     try {
@@ -85,10 +113,11 @@ export default function BillingSettingsScreen({ navigation }: Props) {
         setLegalMentions(s.legalMentions || '');
       }
       
-      // Load billing type from team leader profile
-      const me = await api.getTeamLeaderMe();
-      const tl = me.data || me;
-      setBillingType(tl.billingType || 'platform');
+      // Le backend renvoie maintenant billingType directement dans la réponse
+      // Backend: 'spcp' = plateforme facture | 'self' = auto-facturation
+      // Mobile UI: 'platform' = plateforme | 'self' = auto-facturation
+      const backendBilling = (response as any).billingType || 'spcp';
+      setBillingType(backendBilling === 'self' ? 'self' : 'platform');
     } catch (error: any) {
       console.error('Error loading settings:', error);
       Alert.alert('Erreur', 'Impossible de charger les paramètres');
@@ -100,8 +129,8 @@ export default function BillingSettingsScreen({ navigation }: Props) {
   const handleSave = async () => {
     setSaving(true);
     try {
-      await api.saveBillingSettings({
-        billingType,
+      // Le billingType est défini par l'admin lors de l'invitation, pas modifiable ici
+      const dataToSave: Record<string, any> = {
         companyName,
         siret,
         tvaNumber,
@@ -120,7 +149,8 @@ export default function BillingSettingsScreen({ navigation }: Props) {
         paymentTerms,
         paymentDelayDays: parseInt(paymentDelayDays) || 30,
         legalMentions,
-      });
+      };
+      await api.saveBillingSettings(dataToSave);
       
       Alert.alert('Succès', 'Paramètres enregistrés avec succès');
     } catch (error: any) {
@@ -202,6 +232,34 @@ export default function BillingSettingsScreen({ navigation }: Props) {
     );
   }
 
+  // Tech sous un TL → pas accès, la facturation est gérée par le TL
+  if (isTechUnderTL) {
+    return (
+      <SafeAreaView style={styles.container}>
+        <View style={styles.header}>
+          <TouchableOpacity onPress={() => navigation.goBack()} style={styles.backButton}>
+            <Text style={styles.backButtonText}>← Retour</Text>
+          </TouchableOpacity>
+          <Text style={styles.headerTitle}>Facturation</Text>
+          <View style={{ width: 60 }} />
+        </View>
+        <View style={styles.blockedContainer}>
+          <Text style={styles.blockedIcon}>🏢</Text>
+          <Text style={styles.blockedTitle}>Facturation gérée par votre chef d'équipe</Text>
+          <Text style={styles.blockedText}>
+            Les factures et devis sont émis au nom de la société de votre chef d'équipe. Vous n'avez pas de paramètres de facturation à configurer.
+          </Text>
+          <TouchableOpacity
+            style={styles.blockedButton}
+            onPress={() => navigation.goBack()}
+          >
+            <Text style={styles.blockedButtonText}>Retour</Text>
+          </TouchableOpacity>
+        </View>
+      </SafeAreaView>
+    );
+  }
+
   return (
     <SafeAreaView style={styles.container}>
       <View style={styles.header}>
@@ -213,49 +271,20 @@ export default function BillingSettingsScreen({ navigation }: Props) {
       </View>
 
       <ScrollView style={styles.scrollView} contentContainerStyle={styles.content}>
-        {/* Mode de facturation */}
+        {/* Mode de facturation - lecture seule, défini par l'admin */}
         <View style={styles.section}>
           <Text style={styles.sectionTitle}>Mode de facturation</Text>
-          <View style={styles.billingModeCard}>
-            <View style={styles.billingModeOption}>
-              <TouchableOpacity
-                style={[
-                  styles.modeButton,
-                  billingType === 'platform' && styles.modeButtonActive
-                ]}
-                onPress={() => setBillingType('platform')}
-              >
-                <Text style={[
-                  styles.modeButtonText,
-                  billingType === 'platform' && styles.modeButtonTextActive
-                ]}>
-                  🏢 La plateforme facture
-                </Text>
-                <Text style={styles.modeDescription}>
-                  Nous gérons la facturation pour vous
-                </Text>
-              </TouchableOpacity>
-            </View>
-            
-            <View style={styles.billingModeOption}>
-              <TouchableOpacity
-                style={[
-                  styles.modeButton,
-                  billingType === 'self' && styles.modeButtonActive
-                ]}
-                onPress={() => setBillingType('self')}
-              >
-                <Text style={[
-                  styles.modeButtonText,
-                  billingType === 'self' && styles.modeButtonTextActive
-                ]}>
-                  🏪 Je facture moi-même
-                </Text>
-                <Text style={styles.modeDescription}>
-                  Avec ma propre société
-                </Text>
-              </TouchableOpacity>
-            </View>
+          
+          <View style={styles.readOnlyBanner}>
+            <Text style={styles.readOnlyBannerText}>
+              {billingType === 'self' 
+                ? '🏪 Vous êtes en mode auto-facturation. Vous facturez avec votre propre société.'
+                : '🏢 Vous êtes en mode plateforme. La plateforme gère la facturation pour vous.'
+              }
+            </Text>
+            <Text style={[styles.readOnlyBannerText, { marginTop: 6, fontStyle: 'italic' }]}>
+              Ce mode a été défini par votre administrateur et ne peut pas être modifié ici.
+            </Text>
           </View>
         </View>
 
@@ -492,7 +521,7 @@ export default function BillingSettingsScreen({ navigation }: Props) {
           <View style={styles.platformInfoCard}>
             <Text style={styles.platformInfoTitle}>🏢 Mode plateforme</Text>
             <Text style={styles.platformInfoText}>
-              La plateforme gère la facturation pour vous. Vous n'avez pas besoin de configurer les paramètres de facturation.
+              Vous n'avez pas besoin de configurer de paramètres de facturation.
             </Text>
             <Text style={styles.platformInfoText}>
               Les factures seront émises au nom de la plateforme et vous recevrez votre commission après paiement du client.
@@ -577,29 +606,52 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: COLORS.border,
   },
-  billingModeCard: {
-    gap: 12,
+  blockedContainer: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    paddingHorizontal: 32,
   },
-  billingModeOption: {},
-  modeButton: {
-    backgroundColor: COLORS.card,
+  blockedIcon: {
+    fontSize: 64,
+    marginBottom: 20,
+  },
+  blockedTitle: {
+    fontSize: 20,
+    fontWeight: '700',
+    color: COLORS.text,
+    textAlign: 'center',
+    marginBottom: 12,
+  },
+  blockedText: {
+    fontSize: 15,
+    color: COLORS.textMuted,
+    textAlign: 'center',
+    lineHeight: 22,
+    marginBottom: 28,
+  },
+  blockedButton: {
+    backgroundColor: COLORS.primary,
+    paddingVertical: 14,
+    paddingHorizontal: 40,
     borderRadius: 12,
-    padding: 16,
-    borderWidth: 2,
-    borderColor: COLORS.border,
   },
-  modeButtonActive: {
-    borderColor: COLORS.primary,
-    backgroundColor: '#eff6ff',
-  },
-  modeButtonText: {
+  blockedButtonText: {
+    color: '#fff',
     fontSize: 16,
     fontWeight: '600',
-    color: COLORS.text,
-    marginBottom: 4,
   },
-  modeButtonTextActive: {
-    color: COLORS.primary,
+  readOnlyBanner: {
+    backgroundColor: '#f0f9ff',
+    borderRadius: 12,
+    padding: 16,
+    borderWidth: 1,
+    borderColor: '#bae6fd',
+  },
+  readOnlyBannerText: {
+    fontSize: 14,
+    color: '#0c4a6e',
+    lineHeight: 20,
   },
   modeDescription: {
     fontSize: 13,

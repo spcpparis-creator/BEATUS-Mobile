@@ -19,6 +19,8 @@ interface Props {
   navigation: any;
 }
 
+const DEPOSIT_PERCENTAGE = 50;
+
 const STATUS_CONFIG: Record<string, { label: string; color: string; bg: string }> = {
   draft: { label: 'Brouillon', color: '#6b7280', bg: '#f3f4f6' },
   sent: { label: 'Envoyée', color: '#0369a1', bg: '#e0f2fe' },
@@ -43,7 +45,22 @@ export default function InvoiceDetailScreen({ route, navigation }: Props) {
   const loadInvoice = async () => {
     try {
       const data = await api.getInvoice(invoiceId);
-      setInvoice(data);
+      const parseNum = (v: any) => {
+        if (v == null) return 0;
+        const n = typeof v === 'string' ? parseFloat(v) : v;
+        return isNaN(n) ? 0 : n;
+      };
+      const normalized = {
+        ...data,
+        amountHt: parseNum(data.amount_ht ?? data.amountHt ?? data.amountHT),
+        amountTtc: parseNum(data.amount_ttc ?? data.amountTtc ?? data.amountTTC),
+        tvaRate: parseNum(data.tva_rate ?? data.tvaRate ?? 20),
+        tvaAmount: parseNum(data.tva_amount ?? data.tvaAmount),
+        amountPaid: parseNum(data.amount_paid ?? data.amountPaid),
+        depositAmount: parseNum(data.deposit_amount ?? data.depositAmount),
+        balanceAmount: parseNum(data.balance_amount ?? data.balanceAmount),
+      };
+      setInvoice(normalized);
     } catch (error: any) {
       Alert.alert('Erreur', error.message || 'Impossible de charger la facture');
       navigation.goBack();
@@ -53,9 +70,12 @@ export default function InvoiceDetailScreen({ route, navigation }: Props) {
   };
 
   const handleSend = async () => {
+    const depositAlreadyPaid = invoice?.depositAmount || (invoice?.amountTtc ? parseFloat((invoice.amountTtc * DEPOSIT_PERCENTAGE / 100).toFixed(2)) : 0);
+    const balanceAmount = invoice?.balanceAmount || (invoice?.amountTtc ? parseFloat((invoice.amountTtc - depositAlreadyPaid).toFixed(2)) : 0);
+
     Alert.alert(
       'Envoyer la facture',
-      `Envoyer la facture à ${invoice.clientEmail || 'l\'adresse email du client'} ?`,
+      `Envoyer la facture à ${invoice.clientEmail || 'l\'adresse email du client'} ?\n\nUn lien de paiement du solde de ${formatCurrency(balanceAmount)} sera inclus dans l'email.`,
       [
         { text: 'Annuler', style: 'cancel' },
         {
@@ -63,8 +83,17 @@ export default function InvoiceDetailScreen({ route, navigation }: Props) {
           onPress: async () => {
             setActionLoading('send');
             try {
-              await api.sendInvoice(invoiceId);
-              Alert.alert('Succès', 'Facture envoyée avec succès');
+              const result = await api.sendInvoice(invoiceId);
+              const sentInvoice = result?.invoice || result;
+              const finalBalance = sentInvoice?.balanceAmount || balanceAmount;
+              const hasPaymentLink = !!(sentInvoice?.sumupCheckoutUrl || sentInvoice?.stripeCheckoutUrl);
+
+              Alert.alert(
+                'Facture envoyée !',
+                hasPaymentLink
+                  ? `Facture envoyée avec lien de solde de ${formatCurrency(finalBalance)}`
+                  : `Facture envoyée avec succès.\nSolde dû : ${formatCurrency(finalBalance)}`
+              );
               loadInvoice();
             } catch (error: any) {
               Alert.alert('Erreur', error.message || 'Impossible d\'envoyer la facture');
@@ -232,6 +261,50 @@ export default function InvoiceDetailScreen({ route, navigation }: Props) {
           </View>
         </View>
 
+        {/* Carte acompte / solde */}
+        {invoice?.amountTtc > 0 && (invoice?.depositAmount > 0 || invoice?.linkedQuoteId) && (
+          <View style={styles.depositBalanceCard}>
+            <Text style={styles.depositBalanceTitle}>Détail paiement</Text>
+            <View style={styles.depositBalanceRow}>
+              <Text style={styles.depositBalanceLabel}>Acompte versé</Text>
+              <View style={styles.depositBalanceRight}>
+                <Text style={[
+                  styles.depositBalanceValue,
+                  { color: '#059669' },
+                ]}>
+                  {formatCurrency(invoice?.depositAmount || invoice?.amountTtc * DEPOSIT_PERCENTAGE / 100)}
+                </Text>
+                <Text style={styles.depositBadgePaid}>Payé</Text>
+              </View>
+            </View>
+            <View style={styles.depositBalanceDivider} />
+            <View style={styles.depositBalanceRow}>
+              <Text style={[styles.depositBalanceLabel, { fontWeight: '600' }]}>Solde restant</Text>
+              <View style={styles.depositBalanceRight}>
+                <Text style={[
+                  styles.depositBalanceValue,
+                  { fontWeight: '700', color: invoice?.balancePaid ? '#059669' : '#dc2626' },
+                ]}>
+                  {formatCurrency(invoice?.balanceAmount || (invoice?.amountTtc - (invoice?.depositAmount || invoice?.amountTtc * DEPOSIT_PERCENTAGE / 100)))}
+                </Text>
+                {invoice?.balancePaid ? (
+                  <Text style={styles.depositBadgePaid}>Payé</Text>
+                ) : (
+                  <Text style={styles.depositBadgePending}>En attente</Text>
+                )}
+              </View>
+            </View>
+            {(invoice?.stripeCheckoutUrl || invoice?.sumupCheckoutUrl) && !invoice?.balancePaid && (
+              <View style={styles.sumupInfoRow}>
+                <View style={styles.sumupBadge}>
+                  <Text style={styles.sumupBadgeText}>{invoice?.stripeCheckoutUrl ? 'Stripe' : 'SumUp'}</Text>
+                </View>
+                <Text style={styles.sumupInfoText}>Lien de paiement envoyé au client</Text>
+              </View>
+            )}
+          </View>
+        )}
+
         {/* Issuer info */}
         {invoice?.issuerCompanyName && (
           <View style={styles.card}>
@@ -311,6 +384,22 @@ export default function InvoiceDetailScreen({ route, navigation }: Props) {
               <Text style={styles.totalLabelFinal}>Total TTC</Text>
               <Text style={styles.totalValueFinal}>{formatCurrency(invoice?.amountTtc)}</Text>
             </View>
+            {(invoice?.depositAmount > 0 || invoice?.linkedQuoteId) && invoice?.amountTtc > 0 && (
+              <>
+                <View style={[styles.totalRow, { marginTop: 8 }]}>
+                  <Text style={[styles.totalLabel, { color: '#059669' }]}>Acompte versé</Text>
+                  <Text style={[styles.totalValue, { color: '#059669', fontWeight: '600' }]}>
+                    - {formatCurrency(invoice?.depositAmount || invoice?.amountTtc * DEPOSIT_PERCENTAGE / 100)}
+                  </Text>
+                </View>
+                <View style={[styles.totalRow, { borderTopWidth: 1, borderTopColor: '#e5e7eb', paddingTop: 8, marginTop: 4 }]}>
+                  <Text style={[styles.totalLabelFinal, { color: '#dc2626' }]}>Solde à payer</Text>
+                  <Text style={[styles.totalValueFinal, { color: '#dc2626' }]}>
+                    {formatCurrency(invoice?.balanceAmount || (invoice?.amountTtc - (invoice?.depositAmount || invoice?.amountTtc * DEPOSIT_PERCENTAGE / 100)))}
+                  </Text>
+                </View>
+              </>
+            )}
           </View>
         </View>
 
@@ -501,6 +590,90 @@ const styles = StyleSheet.create({
     fontSize: 13,
     color: COLORS.textMuted,
     marginTop: 4,
+  },
+  depositBalanceCard: {
+    backgroundColor: '#f0f9ff',
+    borderRadius: 12,
+    padding: 16,
+    marginBottom: 16,
+    borderWidth: 1,
+    borderColor: '#bae6fd',
+  },
+  depositBalanceTitle: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: '#0369a1',
+    marginBottom: 12,
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
+  },
+  depositBalanceRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingVertical: 6,
+  },
+  depositBalanceLabel: {
+    fontSize: 14,
+    color: '#374151',
+  },
+  depositBalanceRight: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  depositBalanceValue: {
+    fontSize: 15,
+    fontWeight: '600',
+  },
+  depositBadgePaid: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: '#059669',
+    backgroundColor: '#d1fae5',
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 4,
+    overflow: 'hidden',
+  },
+  depositBadgePending: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: '#d97706',
+    backgroundColor: '#fef3c7',
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 4,
+    overflow: 'hidden',
+  },
+  depositBalanceDivider: {
+    height: 1,
+    backgroundColor: '#bae6fd',
+    marginVertical: 6,
+  },
+  sumupInfoRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    marginTop: 10,
+    paddingTop: 10,
+    borderTopWidth: 1,
+    borderTopColor: '#bae6fd',
+  },
+  sumupBadge: {
+    backgroundColor: '#0ea5e9',
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 6,
+  },
+  sumupBadgeText: {
+    color: '#fff',
+    fontSize: 11,
+    fontWeight: '700',
+  },
+  sumupInfoText: {
+    fontSize: 13,
+    color: '#6b7280',
   },
   card: {
     backgroundColor: COLORS.card,

@@ -1,0 +1,40 @@
+# Exigence backend : persistance du profil Team Leader
+
+## Problème
+
+L'app mobile demande à chaque connexion au Team Leader de "compléter son profil" (nom, téléphone) car les données ne semblent pas persistées.
+
+## Contrat API obligatoire
+
+### PATCH /api/team-leaders/me
+
+**Le backend doit PERSISTER les champs envoyés dans la base de données.**
+
+Exemple de body :
+```json
+{
+  "name": "Jean Dupont",
+  "phone": "06 12 34 56 78",
+  "selectedDepartments": ["75", "94"],
+  "activityIds": ["uuid-1"]
+}
+```
+
+- Les champs `name` et `phone` doivent être **écrits en base** immédiatement
+- Au prochain `GET /api/team-leaders/me`, ces valeurs doivent être retournées
+
+### GET /api/team-leaders/me
+
+Doit retourner l'objet Team Leader avec au minimum :
+- `name` (string)
+- `phone` (string)
+- `selectedDepartments` ou `selected_departments` (array)
+- `activityIds` ou `activity_ids` (array)
+
+## Critère "profil complet" (côté mobile)
+
+Le profil TL est considéré complet si :
+- `selectedDepartments.length > 0` (secteurs définis par l'admin), OU
+- `name` et `phone` sont tous deux renseignés (non vides)
+
+Si le backend ne persiste pas `name` et `phone`, le TL devra remplir le formulaire à chaque connexion.

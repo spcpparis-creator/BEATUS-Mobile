@@ -41,25 +41,22 @@ const FRENCH_DEPARTMENTS: Record<string, string> = {
   '94': 'Val-de-Marne', '95': "Val-d'Oise"
 };
 
-const SPECIALTIES = [
-  'Plomberie',
-  'Électricité', 
-  'Chauffage',
-  'Climatisation',
-  'Serrurerie',
-  'Vitrerie',
-  'Menuiserie',
-  'Peinture',
-];
+interface Activity {
+  id: string;
+  name: string;
+  description?: string;
+  isActive: boolean;
+}
 
 export default function TechnicianDefaultsScreen({ navigation }: Props) {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [teamLeader, setTeamLeader] = useState<any>(null);
-  const [defaultCommission, setDefaultCommission] = useState('30');
+  const [defaultCommission, setDefaultCommission] = useState('20');
   const [defaultSectors, setDefaultSectors] = useState<string[]>([]);
   const [defaultSpecialties, setDefaultSpecialties] = useState<string[]>([]);
-  const [showSectorPicker, setShowSectorPicker] = useState(false);
+  const [activities, setActivities] = useState<Activity[]>([]);
+  const [loadingActivities, setLoadingActivities] = useState(true);
 
   useEffect(() => {
     loadSettings();
@@ -67,14 +64,24 @@ export default function TechnicianDefaultsScreen({ navigation }: Props) {
 
   const loadSettings = async () => {
     try {
-      const data = await api.getTeamLeaderMe();
-      const tl = data.data || data;
+      const [tlData, activitiesData] = await Promise.all([
+        api.getTeamLeaderMe(),
+        api.getActivities().catch(() => []),
+      ]);
+      
+      const tl = tlData.data || tlData;
       setTeamLeader(tl);
-      setDefaultCommission(String(tl.defaultTechnicianCommission || 30));
+      setDefaultCommission(String(tl.defaultTechnicianCommission ?? 20));
       // Les secteurs par défaut sont ceux du team leader
       setDefaultSectors(tl.selectedDepartments || []);
+      
+      // Charger les activités enregistrées par l'admin
+      const acts = Array.isArray(activitiesData) ? activitiesData : activitiesData?.activities || [];
+      setActivities(acts.filter((a: any) => a.isActive !== false));
+      setLoadingActivities(false);
     } catch (error) {
       console.error('Erreur chargement paramètres:', error);
+      setLoadingActivities(false);
     } finally {
       setLoading(false);
     }
@@ -215,31 +222,34 @@ export default function TechnicianDefaultsScreen({ navigation }: Props) {
           </Text>
         </View>
 
-        {/* Spécialités suggérées */}
+        {/* Activités (enregistrées par l'admin) */}
         <View style={styles.section}>
-          <Text style={styles.sectionTitle}>🔧 Spécialités suggérées</Text>
+          <Text style={styles.sectionTitle}>🔧 Activités disponibles</Text>
           <Text style={styles.sectionDescription}>
-            Sélectionnez les spécialités proposées aux nouveaux techniciens
+            Activités enregistrées par l'administrateur, proposées lors de l'invitation d'un technicien
           </Text>
-          <View style={styles.specialtiesGrid}>
-            {SPECIALTIES.map(specialty => (
-              <TouchableOpacity
-                key={specialty}
-                style={[
-                  styles.specialtyButton,
-                  defaultSpecialties.includes(specialty) && styles.specialtyButtonActive
-                ]}
-                onPress={() => toggleSpecialty(specialty)}
-              >
-                <Text style={[
-                  styles.specialtyButtonText,
-                  defaultSpecialties.includes(specialty) && styles.specialtyButtonTextActive
-                ]}>
-                  {specialty}
-                </Text>
-              </TouchableOpacity>
-            ))}
-          </View>
+          {loadingActivities ? (
+            <ActivityIndicator size="small" color={COLORS.primary} style={{ marginVertical: 16 }} />
+          ) : activities.length === 0 ? (
+            <View style={styles.emptyState}>
+              <Text style={styles.emptyStateText}>
+                Aucune activité enregistrée. L'administrateur doit créer les activités depuis son dashboard.
+              </Text>
+            </View>
+          ) : (
+            <View style={styles.specialtiesGrid}>
+              {activities.map(activity => (
+                <View
+                  key={activity.id}
+                  style={[styles.specialtyButton, styles.specialtyButtonActive]}
+                >
+                  <Text style={[styles.specialtyButtonText, styles.specialtyButtonTextActive]}>
+                    {activity.name}
+                  </Text>
+                </View>
+              ))}
+            </View>
+          )}
         </View>
 
         {/* Résumé */}
@@ -256,8 +266,12 @@ export default function TechnicianDefaultsScreen({ navigation }: Props) {
           <View style={styles.summaryRow}>
             <Text style={styles.summaryLabel}>Type de facturation:</Text>
             <Text style={styles.summaryValue}>
-              {teamLeader?.billingType === 'self' ? 'Auto-facturation' : 'SPCP'}
+              {teamLeader?.billingType === 'self' ? 'Auto-facturation' : 'Plateforme'}
             </Text>
+          </View>
+          <View style={styles.summaryRow}>
+            <Text style={styles.summaryLabel}>Activités disponibles:</Text>
+            <Text style={styles.summaryValue}>{activities.length}</Text>
           </View>
         </View>
 

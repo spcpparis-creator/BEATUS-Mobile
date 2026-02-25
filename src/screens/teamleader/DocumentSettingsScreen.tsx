@@ -49,6 +49,8 @@ export default function DocumentSettingsScreen({ navigation }: Props) {
     loadSettings();
   }, []);
 
+  const [accessDenied, setAccessDenied] = useState(false);
+
   const loadSettings = async () => {
     try {
       const templates = await api.getUserTemplates();
@@ -65,8 +67,12 @@ export default function DocumentSettingsScreen({ navigation }: Props) {
           payment_instructions: quoteTemplate.variables.payment_instructions || '',
         });
       }
-    } catch (error) {
-      console.error('Erreur chargement paramètres:', error);
+    } catch (error: any) {
+      if (error?.status === 403 || error?.message?.includes('403')) {
+        setAccessDenied(true);
+      } else {
+        console.error('Erreur chargement paramètres:', error);
+      }
     } finally {
       setLoading(false);
     }
@@ -115,6 +121,34 @@ export default function DocumentSettingsScreen({ navigation }: Props) {
       <SafeAreaView style={styles.container}>
         <View style={styles.loadingContainer}>
           <ActivityIndicator size="large" color={COLORS.primary} />
+        </View>
+      </SafeAreaView>
+    );
+  }
+
+  if (accessDenied) {
+    return (
+      <SafeAreaView style={styles.container} edges={['top']}>
+        <View style={styles.header}>
+          <TouchableOpacity onPress={() => navigation.goBack()} style={styles.backButton}>
+            <Text style={styles.backButtonText}>← Retour</Text>
+          </TouchableOpacity>
+          <Text style={styles.title}>Devis & Factures</Text>
+        </View>
+        <View style={styles.loadingContainer}>
+          <Text style={{ fontSize: 48, marginBottom: 16 }}>🔒</Text>
+          <Text style={{ fontSize: 18, fontWeight: '600', color: COLORS.text, textAlign: 'center', marginBottom: 8 }}>
+            Fonctionnalité non disponible
+          </Text>
+          <Text style={{ fontSize: 14, color: COLORS.textMuted, textAlign: 'center', paddingHorizontal: 40 }}>
+            La personnalisation des documents est réservée aux utilisateurs avec facturation autonome.
+          </Text>
+          <TouchableOpacity
+            style={{ marginTop: 24, backgroundColor: '#7c3aed', paddingHorizontal: 24, paddingVertical: 12, borderRadius: 12 }}
+            onPress={() => navigation.goBack()}
+          >
+            <Text style={{ color: '#fff', fontWeight: '600' }}>Retour</Text>
+          </TouchableOpacity>
         </View>
       </SafeAreaView>
     );

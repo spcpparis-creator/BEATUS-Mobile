@@ -19,6 +19,8 @@ interface Props {
   navigation: any;
 }
 
+const DEPOSIT_PERCENTAGE = 50;
+
 const STATUS_CONFIG: Record<string, { label: string; color: string; bg: string }> = {
   draft: { label: 'Brouillon', color: '#6b7280', bg: '#f3f4f6' },
   sent: { label: 'Envoyé', color: '#0369a1', bg: '#e0f2fe' },
@@ -42,7 +44,40 @@ export default function QuoteDetailScreen({ route, navigation }: Props) {
   const loadQuote = async () => {
     try {
       const data = await api.getQuote(quoteId);
-      setQuote(data);
+      // Normaliser snake_case → camelCase (le backend retourne en snake_case)
+      // Les montants sont des strings en DB ("249.00"), il faut les parser en nombre
+      const parseNum = (v: any) => {
+        const n = parseFloat(v);
+        return isNaN(n) ? 0 : n;
+      };
+      const rawHt = data.amount_ht ?? data.amountHt ?? data.amountHT ?? 0;
+      const rawTtc = data.amount_ttc ?? data.amountTtc ?? data.amountTTC ?? 0;
+      const rawTva = data.tva_amount ?? data.tvaAmount ?? 0;
+      const rawTvaRate = data.tva_rate ?? data.tvaRate ?? 20;
+
+      const normalized = {
+        ...data,
+        amountHt: parseNum(rawHt),
+        amountTtc: parseNum(rawTtc),
+        tvaRate: parseNum(rawTvaRate),
+        tvaAmount: parseNum(rawTva),
+        clientName: data.client_name ?? data.clientName ?? '',
+        clientEmail: data.client_email ?? data.clientEmail ?? '',
+        clientPhone: data.client_phone ?? data.clientPhone ?? '',
+        clientAddress: data.client_address ?? data.clientAddress ?? null,
+        createdAt: data.created_at ?? data.createdAt ?? '',
+        validUntil: data.valid_until ?? data.validUntil ?? '',
+        sentAt: data.sent_at ?? data.sentAt ?? null,
+        acceptedAt: data.accepted_at ?? data.acceptedAt ?? null,
+        depositAmount: parseNum(data.deposit_amount ?? data.depositAmount ?? 0),
+        depositPaid: data.deposit_paid ?? data.depositPaid ?? false,
+        depositPercentage: parseNum(data.deposit_percentage ?? data.depositPercentage ?? 0),
+        sumupCheckoutUrl: data.sumup_checkout_url ?? data.sumupCheckoutUrl ?? null,
+        stripeCheckoutUrl: data.stripe_checkout_url ?? data.stripeCheckoutUrl ?? null,
+        interventionId: data.intervention_id ?? data.interventionId ?? null,
+      };
+      console.log(`[QuoteDetail] rawHt=${rawHt}, rawTtc=${rawTtc}, parsed: HT=${normalized.amountHt}, TTC=${normalized.amountTtc}`);
+      setQuote(normalized);
     } catch (error: any) {
       Alert.alert('Erreur', error.message || 'Impossible de charger le devis');
       navigation.goBack();
@@ -52,9 +87,10 @@ export default function QuoteDetailScreen({ route, navigation }: Props) {
   };
 
   const handleSend = async () => {
+    const depositAmount = quote?.depositAmount || (quote?.amountTtc ? parseFloat((quote.amountTtc * DEPOSIT_PERCENTAGE / 100).toFixed(2)) : 0);
     Alert.alert(
       'Envoyer le devis',
-      `Envoyer le devis à ${quote.clientEmail || 'l\'adresse email du client'} ?`,
+      `Envoyer le devis à ${quote.clientEmail || 'l\'adresse email du client'} ?\n\nUn lien de paiement d'acompte de ${formatCurrency(depositAmount)} sera inclus dans l'email.`,
       [
         { text: 'Annuler', style: 'cancel' },
         {
@@ -62,8 +98,17 @@ export default function QuoteDetailScreen({ route, navigation }: Props) {
           onPress: async () => {
             setActionLoading('send');
             try {
-              await api.sendQuote(quoteId);
-              Alert.alert('Succès', 'Devis envoyé avec succès');
+              const result = await api.sendQuote(quoteId);
+              const sentQuote = result?.quote || result;
+              const finalDeposit = sentQuote?.depositAmount || depositAmount;
+              const hasPaymentLink = !!sentQuote?.sumupCheckoutUrl;
+              
+              Alert.alert(
+                'Devis envoyé !',
+                hasPaymentLink
+                  ? `Devis envoyé avec lien d'acompte de ${formatCurrency(finalDeposit)}`
+                  : `Devis envoyé avec succès.\nAcompte prévu : ${formatCurrency(finalDeposit)}`
+              );
               loadQuote();
             } catch (error: any) {
               Alert.alert('Erreur', error.message || 'Impossible d\'envoyer le devis');
@@ -239,8 +284,46 @@ export default function QuoteDetailScreen({ route, navigation }: Props) {
               <Text style={[styles.statusText, { color: status.color }]}>{status.label}</Text>
             </View>
           </View>
-          <Text style={styles.totalAmount}>{formatCurrency(quote?.amountTtc)}</Text>
+          <View style={{ alignItems: 'flex-end' }}>
+            <Text style={styles.totalAmount}>{formatCurrency(quote?.amountTtc)}</Text>
+            {quote?.amountTtc > 0 && (
+              <Text style={styles.depositSubtext}>
+                Acompte : {formatCurrency(quote?.depositAmount || quote?.amountTtc * DEPOSIT_PERCENTAGE / 100)}
+              </Text>
+            )}
+          </View>
         </View>
+
+        {/* Statut paiement acompte */}
+        {quote?.status !== 'draft' && quote?.amountTtc > 0 && (
+          <View style={[
+            styles.depositStatusCard,
+            quote?.depositPaid ? styles.depositPaidCard : styles.depositPendingCard,
+          ]}>
+            <View style={styles.depositStatusRow}>
+              <Text style={styles.depositStatusIcon}>
+                {quote?.depositPaid ? '✅' : '⏳'}
+              </Text>
+              <View style={{ flex: 1 }}>
+                <Text style={[
+                  styles.depositStatusTitle,
+                  { color: quote?.depositPaid ? '#059669' : '#d97706' },
+                ]}>
+                  {quote?.depositPaid ? 'Acompte payé' : 'Acompte en attente'}
+                </Text>
+                <Text style={styles.depositStatusAmount}>
+                  {formatCurrency(quote?.depositAmount || quote?.amountTtc * DEPOSIT_PERCENTAGE / 100)}
+                  {' '}({quote?.depositPercentage || DEPOSIT_PERCENTAGE}% du total)
+                </Text>
+              </View>
+              {(quote?.stripeCheckoutUrl || quote?.sumupCheckoutUrl) && !quote?.depositPaid && (
+                <View style={styles.sumupBadge}>
+                  <Text style={styles.sumupBadgeText}>{quote?.stripeCheckoutUrl ? 'Stripe' : 'SumUp'}</Text>
+                </View>
+              )}
+            </View>
+          </View>
+        )}
 
         {/* Client info */}
         <View style={styles.card}>
@@ -304,6 +387,24 @@ export default function QuoteDetailScreen({ route, navigation }: Props) {
               <Text style={styles.totalLabelFinal}>Total TTC</Text>
               <Text style={styles.totalValueFinal}>{formatCurrency(quote?.amountTtc)}</Text>
             </View>
+            {quote?.amountTtc > 0 && (
+              <>
+                <View style={[styles.totalRow, { marginTop: 8 }]}>
+                  <Text style={[styles.totalLabel, { color: '#0369a1' }]}>
+                    Acompte ({quote?.depositPercentage || DEPOSIT_PERCENTAGE}%)
+                  </Text>
+                  <Text style={[styles.totalValue, { color: '#0369a1', fontWeight: '600' }]}>
+                    {formatCurrency(quote?.depositAmount || quote?.amountTtc * DEPOSIT_PERCENTAGE / 100)}
+                  </Text>
+                </View>
+                <View style={styles.totalRow}>
+                  <Text style={[styles.totalLabel, { color: '#6b7280' }]}>Solde restant</Text>
+                  <Text style={[styles.totalValue, { color: '#6b7280' }]}>
+                    {formatCurrency(quote?.amountTtc - (quote?.depositAmount || quote?.amountTtc * DEPOSIT_PERCENTAGE / 100))}
+                  </Text>
+                </View>
+              </>
+            )}
           </View>
         </View>
 
@@ -481,6 +582,54 @@ const styles = StyleSheet.create({
     fontSize: 24,
     fontWeight: '700',
     color: COLORS.primary,
+  },
+  depositSubtext: {
+    fontSize: 13,
+    color: '#0369a1',
+    marginTop: 4,
+    fontWeight: '500',
+  },
+  depositStatusCard: {
+    borderRadius: 12,
+    padding: 14,
+    marginBottom: 16,
+    borderWidth: 1,
+  },
+  depositPaidCard: {
+    backgroundColor: '#d1fae5',
+    borderColor: '#6ee7b7',
+  },
+  depositPendingCard: {
+    backgroundColor: '#fef3c7',
+    borderColor: '#fcd34d',
+  },
+  depositStatusRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+  },
+  depositStatusIcon: {
+    fontSize: 22,
+  },
+  depositStatusTitle: {
+    fontSize: 15,
+    fontWeight: '600',
+  },
+  depositStatusAmount: {
+    fontSize: 13,
+    color: '#6b7280',
+    marginTop: 2,
+  },
+  sumupBadge: {
+    backgroundColor: '#0ea5e9',
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 6,
+  },
+  sumupBadgeText: {
+    color: '#fff',
+    fontSize: 11,
+    fontWeight: '700',
   },
   card: {
     backgroundColor: COLORS.card,

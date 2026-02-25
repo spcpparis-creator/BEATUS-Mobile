@@ -4,26 +4,41 @@
     "slug": "beatus-mobile",
     "version": "1.0.0",
     "orientation": "portrait",
+    "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",
+    "splash": {
+      "image": "./assets/splash.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#ffffff"
+    },
     "scheme": "beatus",
-    "plugins": ["expo-notifications"],
+    "plugins": ["expo-notifications", "expo-apple-authentication"],
     "ios": {
       "supportsTablet": true,
       "bundleIdentifier": "com.beatus.mobile",
+      "usesAppleSignIn": true,
       "infoPlist": {
         "NSLocationWhenInUseUsageDescription": "BEATUS utilise votre position pour localiser les interventions sur la carte.",
-        "NSPhotoLibraryUsageDescription": "BEATUS accède à vos photos pour ajouter des logos et documents."
+        "NSPhotoLibraryUsageDescription": "BEATUS accède à vos photos pour ajouter des logos et documents.",
+        "ITSAppUsesNonExemptEncryption": false
       }
     },
     "android": {
       "package": "com.beatus.mobile",
       "adaptiveIcon": {
+        "foregroundImage": "./assets/icon.png",
         "backgroundColor": "#ffffff"
       },
-      "permissions": ["RECEIVE_BOOT_COMPLETED", "VIBRATE"]
+      "permissions": ["RECEIVE_BOOT_COMPLETED", "VIBRATE"],
+      "notification": {
+        "color": "#3b82f6"
+      }
     },
     "extra": {
-      "apiBaseUrl": "https://beatus-backend.deno.dev/api"
+      "apiBaseUrl": "https://api.beatus-app.com/api",
+      "eas": {
+        "projectId": "3b61f22f-6ccf-4c8b-a356-155f29d4c8a7"
+      }
     }
   }
 }

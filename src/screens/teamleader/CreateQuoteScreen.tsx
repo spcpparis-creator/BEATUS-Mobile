@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
   View,
   Text,
@@ -10,10 +10,13 @@ import {
   ActivityIndicator,
   Modal,
 } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
+import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
+import SignatureScreen from 'react-native-signature-canvas';
 import { COLORS, API_BASE_URL } from '../../config/api';
 import * as SecureStore from 'expo-secure-store';
-import { generateAndSharePDF } from '../../utils/pdfGenerator';
+import * as Print from 'expo-print';
+import * as FileSystem from 'expo-file-system/legacy';
+import { generateAndSharePDF, generatePDFHtml } from '../../utils/pdfGenerator';
 import api from '../../services/api';
 
 interface Props {
@@ -28,14 +31,17 @@ interface LineItem {
   unitPrice: string;
 }
 
-const STATUS_OPTIONS = [
-  { value: 'draft', label: 'Brouillon' },
-  { value: 'sent', label: 'Envoyé' },
-  { value: 'accepted', label: 'Accepté' },
-  { value: 'rejected', label: 'Rejeté' },
+const DEPOSIT_PERCENTAGE = 50;
+
+const TVA_OPTIONS = [
+  { value: 0, label: '0%' },
+  { value: 5.5, label: '5,5%' },
+  { value: 10, label: '10%' },
+  { value: 20, label: '20%' },
 ];
 
 export default function CreateQuoteScreen({ navigation, route }: Props) {
+  const insets = useSafeAreaInsets();
   const interventionId = route?.params?.interventionId;
   const intervention = route?.params?.intervention;
   const existingQuoteId = route?.params?.quoteId;
@@ -57,14 +63,83 @@ export default function CreateQuoteScreen({ navigation, route }: Props) {
   const [newItemQuantity, setNewItemQuantity] = useState('1');
   const [newItemPrice, setNewItemPrice] = useState('');
   
-  // Montants
-  const [amountTTC, setAmountTTC] = useState('');
-  const [materialCost, setMaterialCost] = useState('');
+  // TVA
+  const [tvaRate, setTvaRate] = useState(20);
+  const [showTvaPicker, setShowTvaPicker] = useState(false);
   
   // Options
-  const [status, setStatus] = useState('draft');
   const [notes, setNotes] = useState('');
-  const [showStatusPicker, setShowStatusPicker] = useState(false);
+
+  // Branding du TL
+  const billingSettingsRef = useRef<any>(null);
+  const [brandingChecked, setBrandingChecked] = useState(false);
+  const isSendingRef = useRef(false);
+
+  // Flux en 3 étapes : Générer → Signer → Envoyer
+  const [savedQuoteData, setSavedQuoteData] = useState<any>(null);
+  const [paymentLink, setPaymentLink] = useState<string | null>(null);
+  const [pdfBase64, setPdfBase64] = useState<string | null>(null);
+  const [signatureBase64, setSignatureBase64] = useState<string | null>(null);
+  const [showSignaturePad, setShowSignaturePad] = useState(false);
+  const [stepLoading, setStepLoading] = useState<string | null>(null);
+  const signatureRef = useRef<any>(null);
+
+  // Vérifier le branding au montage et à chaque retour sur l'écran
+  useEffect(() => {
+    const unsubscribe = navigation.addListener('focus', () => {
+      checkBillingSettings();
+    });
+    return unsubscribe;
+  }, [navigation]);
+
+  const checkBillingSettings = async () => {
+    try {
+      let hasCompanyName = false;
+
+      // Source 1 : billing-settings/me (retourne automatiquement les settings admin si pas self-billing)
+      try {
+        const billingData = await api.getBillingSettings();
+        const settings = billingData?.settings;
+        if (settings?.companyName) {
+          billingSettingsRef.current = settings;
+          hasCompanyName = true;
+        }
+      } catch (_) { /* ignore */ }
+
+      // Source 2 : user-templates (DocumentSettings) - seulement si pas encore trouvé
+      if (!hasCompanyName) {
+        try {
+          const templates = await api.getUserTemplates();
+          const tpl = Array.isArray(templates) ? templates.find((t: any) => t.template_type === 'quote' || t.templateType === 'quote') : null;
+          const vars = tpl?.variables || tpl?.metadata || {};
+          if (vars.company_name || vars.companyName) {
+            billingSettingsRef.current = {
+              companyName: vars.company_name || vars.companyName,
+              siret: vars.siret || '',
+              address: vars.address || '',
+              logoUrl: vars.logo_url || vars.logoUrl || '',
+            };
+            hasCompanyName = true;
+          }
+        } catch (_) { /* ignore */ }
+      }
+
+      if (hasCompanyName) {
+        setBrandingChecked(true);
+      } else {
+        const state = navigation.getState();
+        const hasDocSettings = state?.routes?.some((r: any) => r.name === 'DocumentSettings') ||
+          state?.routeNames?.includes('DocumentSettings');
+        if (hasDocSettings) {
+          navigation.navigate('DocumentSettings');
+        } else {
+          setBrandingChecked(true);
+        }
+      }
+    } catch (e: any) {
+      setBrandingChecked(true);
+    }
+  };
 
   // Charger le devis existant si modification
   useEffect(() => {
@@ -86,9 +161,7 @@ export default function CreateQuoteScreen({ navigation, route }: Props) {
           ? quote.clientAddress 
           : quote.clientAddress?.street || ''
       );
-      setAmountTTC(String(quote.amountTtc || quote.amountTTC || ''));
-      setMaterialCost(String(quote.materialCost || ''));
-      setStatus(quote.status || 'draft');
+      setTvaRate(quote.tvaRate || quote.tva_rate || 20);
       setNotes(quote.notes || '');
       if (quote.items && Array.isArray(quote.items)) {
         setItems(quote.items.map((item: any, idx: number) => ({
@@ -157,11 +230,12 @@ export default function CreateQuoteScreen({ navigation, route }: Props) {
     }, 0);
   };
 
+  const calculateTvaAmount = () => {
+    return calculateItemsTotal() * tvaRate / 100;
+  };
+
   const calculateTotal = () => {
-    const itemsTotal = calculateItemsTotal();
-    const ttc = parseFloat(amountTTC) || 0;
-    const material = parseFloat(materialCost) || 0;
-    return itemsTotal > 0 ? itemsTotal : ttc + material;
+    return calculateItemsTotal() + calculateTvaAmount();
   };
 
   const formatCurrency = (amount: number) => {
@@ -172,7 +246,9 @@ export default function CreateQuoteScreen({ navigation, route }: Props) {
   };
 
   const buildQuoteData = () => {
-    const total = calculateTotal();
+    const totalHT = calculateItemsTotal();
+    const tvaAmount = calculateTvaAmount();
+    const totalTTC = calculateTotal();
     const validItems = items.filter(item => 
       item.description.trim() && parseFloat(item.unitPrice) > 0
     );
@@ -188,138 +264,245 @@ export default function CreateQuoteScreen({ navigation, route }: Props) {
         quantity: parseFloat(item.quantity) || 1,
         unitPrice: parseFloat(item.unitPrice) || 0,
       })) : undefined,
-      amountTTC: total,
-      amountTtc: total,
-      materialCost: parseFloat(materialCost) || undefined,
-      status,
+      amountHT: totalHT,
+      amountHt: totalHT,
+      tvaRate,
+      tvaAmount,
+      amountTTC: totalTTC,
+      amountTtc: totalTTC,
+      status: 'draft',
       notes,
     };
   };
 
-  const handleCreate = async () => {
+  // ──── ÉTAPE 1 : Générer le devis ────
+  const handleGenerate = async () => {
+    if (stepLoading) return;
     if (!clientName.trim()) {
       Alert.alert('Erreur', 'Le nom du client est obligatoire');
       return;
     }
-
+    if (!clientEmail.trim()) {
+      Alert.alert('Erreur', 'L\'email du client est obligatoire pour envoyer le devis');
+      return;
+    }
     const total = calculateTotal();
     if (total <= 0) {
       Alert.alert('Erreur', 'Le montant doit être supérieur à 0');
       return;
     }
 
-    setSaving(true);
+    setStepLoading('generate');
     try {
+      // Charger le branding
+      let branding = billingSettingsRef.current || {};
+      if (!branding.companyName) {
+        try {
+          const tenant = await api.getTenantSettings();
+          if (tenant) {
+            branding = {
+              companyName: tenant.companyName || tenant.company_name || '',
+              siret: tenant.siret || '',
+              headquartersAddress: tenant.headquartersAddress || tenant.headquarters_address || '',
+              companyPhone: tenant.companyPhone || tenant.company_phone || '',
+              companyEmail: tenant.companyEmail || tenant.company_email || '',
+              legalMentions: tenant.legalMentions || tenant.legal_mentions || '',
+              paymentInstructions: tenant.paymentInstructions || tenant.payment_instructions || '',
+              pdfLogoUrl: tenant.pdfLogoUrl || tenant.pdf_logo_url || '',
+              ...branding,
+            };
+            billingSettingsRef.current = branding;
+          }
+        } catch (_) { /* ignore */ }
+      }
+
+      // 1. Sauvegarder le devis
       const token = await SecureStore.getItemAsync('authToken');
       const quoteData = buildQuoteData();
-
-      const url = existingQuoteId 
-        ? `${API_BASE_URL}/quotes/${existingQuoteId}`
+      const quoteId = savedQuoteData?.id || existingQuoteId;
+      const url = quoteId
+        ? `${API_BASE_URL}/quotes/${quoteId}`
         : `${API_BASE_URL}/quotes`;
-      
+
       const response = await fetch(url, {
-        method: existingQuoteId ? 'PUT' : 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${token}`,
-        },
+        method: quoteId ? 'PUT' : 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
         body: JSON.stringify(quoteData),
       });
-
       if (!response.ok) {
         const error = await response.json().catch(() => ({}));
         throw new Error(error.error || 'Erreur lors de la création');
       }
-
-      const data = await response.json();
-      Alert.alert(
-        existingQuoteId ? 'Devis modifié !' : 'Devis créé !', 
-        `Référence: ${data.reference || 'DEV-XXXX'}\nMontant: ${formatCurrency(total)}`,
-        [
-          { text: 'Voir mes documents', onPress: () => navigation.navigate('MyDocuments') },
-          { text: 'OK', onPress: () => navigation.goBack() },
-        ]
-      );
-    } catch (error: any) {
-      Alert.alert('Erreur', error.message || 'Impossible de créer le devis');
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  const handleGeneratePDFAndSend = async () => {
-    if (!clientName.trim()) {
-      Alert.alert('Erreur', 'Le nom du client est obligatoire');
-      return;
-    }
-
-    const total = calculateTotal();
-    if (total <= 0) {
-      Alert.alert('Erreur', 'Le montant doit être supérieur à 0');
-      return;
-    }
-
-    setGeneratingPdf(true);
-    try {
-      // D'abord créer/sauvegarder le devis
-      const token = await SecureStore.getItemAsync('authToken');
-      const quoteData = buildQuoteData();
-
-      const url = existingQuoteId 
-        ? `${API_BASE_URL}/quotes/${existingQuoteId}`
-        : `${API_BASE_URL}/quotes`;
-      
-      const response = await fetch(url, {
-        method: existingQuoteId ? 'PUT' : 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${token}`,
-        },
-        body: JSON.stringify(quoteData),
-      });
-
-      if (!response.ok) {
-        const error = await response.json().catch(() => ({}));
-        throw new Error(error.error || 'Erreur lors de la création');
-      }
-
       const savedQuote = await response.json();
+      const quoteRef = savedQuote.reference || savedQuote.number || '';
+      setSavedQuoteData(savedQuote);
 
-      // Ensuite générer et partager le PDF
-      let branding = {};
-      try {
-        branding = await api.getTenantSettings() || {};
-      } catch (e) {
-        console.log('Branding non disponible');
+      // 2. Créer le lien de paiement (SumUp puis Stripe en fallback)
+      const depositPercent = DEPOSIT_PERCENTAGE;
+      const depositAmount = total * (depositPercent / 100);
+      let link: string | null = null;
+
+      if (depositAmount > 0) {
+        try {
+          const sumupRes = await api.createSumUpCheckout({
+            amount: parseFloat(depositAmount.toFixed(2)),
+            description: `Acompte ${depositPercent}% — Devis ${quoteRef} — ${clientName}`,
+            purpose: 'deposit',
+            referenceId: savedQuote.id,
+            referenceType: 'quote',
+          });
+          link = sumupRes.checkoutUrl;
+        } catch (_) {
+          try {
+            const stripeRes = await api.createStripeCheckout({
+              amount: parseFloat(depositAmount.toFixed(2)),
+              quoteId: savedQuote.id,
+              quoteReference: quoteRef,
+              clientName,
+              description: `Acompte ${depositPercent}% — Devis ${quoteRef} — ${clientName}`,
+            });
+            link = stripeRes.checkoutUrl;
+          } catch (_e2) {
+            console.warn('Aucun lien de paiement disponible');
+          }
+        }
       }
+      setPaymentLink(link);
 
+      // 3. Générer le PDF
       const pdfData = {
         ...savedQuote,
-        number: savedQuote.reference,
+        number: quoteRef,
+        amountHT: calculateItemsTotal(),
+        tvaRate,
+        tvaAmount: calculateTvaAmount(),
         amountTTC: total,
-        clientAddress: clientAddress,
-        interventionReference: intervention?.reference || savedQuote.interventionReference || savedQuote.reference,
+        clientAddress,
+        interventionReference: intervention?.reference || savedQuote.interventionReference || quoteRef,
         items: items.length > 0 ? items.map(item => ({
           description: item.description,
           quantity: parseFloat(item.quantity) || 1,
           unitPrice: parseFloat(item.unitPrice) || 0,
         })) : undefined,
       };
+      const html = await generatePDFHtml(pdfData, 'quote', branding);
+      const { uri } = await Print.printToFileAsync({ html, base64: false });
+      const base64 = await FileSystem.readAsStringAsync(uri, { encoding: FileSystem.EncodingType.Base64 });
+      setPdfBase64(base64);
+      setSignatureBase64(null);
 
-      await generateAndSharePDF(pdfData, 'quote', branding);
+      Alert.alert('Devis généré', `Devis ${quoteRef} créé avec succès.${link ? '\nLien de paiement inclus.' : ''}\n\nVous pouvez l\'envoyer directement ou le signer avant.`);
+    } catch (error: any) {
+      Alert.alert('Erreur', error.message || 'Impossible de générer le devis');
+    } finally {
+      setStepLoading(null);
+    }
+  };
+
+  // ──── ÉTAPE 2 : Signer ────
+  const handleOpenSignature = () => {
+    if (!pdfBase64) {
+      Alert.alert('Erreur', 'Veuillez d\'abord générer le devis');
+      return;
+    }
+    setShowSignaturePad(true);
+  };
+
+  const handleSignatureCapture = async (sigBase64: string) => {
+    setShowSignaturePad(false);
+    setStepLoading('sign');
+    try {
+      setSignatureBase64(sigBase64);
+
+      // Re-générer le PDF avec la signature intégrée
+      let branding = billingSettingsRef.current || {};
+      const quoteRef = savedQuoteData?.reference || savedQuoteData?.number || '';
+      const total = calculateTotal();
+      const pdfData = {
+        ...savedQuoteData,
+        number: quoteRef,
+        amountHT: calculateItemsTotal(),
+        tvaRate,
+        tvaAmount: calculateTvaAmount(),
+        amountTTC: total,
+        clientAddress,
+        interventionReference: intervention?.reference || savedQuoteData?.interventionReference || quoteRef,
+        items: items.length > 0 ? items.map(item => ({
+          description: item.description,
+          quantity: parseFloat(item.quantity) || 1,
+          unitPrice: parseFloat(item.unitPrice) || 0,
+        })) : undefined,
+      };
+      const html = await generatePDFHtml(pdfData, 'quote', branding, sigBase64);
+      const { uri } = await Print.printToFileAsync({ html, base64: false });
+      const base64 = await FileSystem.readAsStringAsync(uri, { encoding: FileSystem.EncodingType.Base64 });
+      setPdfBase64(base64);
+
+      Alert.alert('Signature ajoutée', 'Le devis est signé. Vous pouvez maintenant l\'envoyer.');
+    } catch (error: any) {
+      Alert.alert('Erreur', 'Impossible d\'intégrer la signature');
+    } finally {
+      setStepLoading(null);
+    }
+  };
+
+  // ──── ÉTAPE 3 : Envoyer ────
+  const handleSendEmail = async () => {
+    if (isSendingRef.current || !pdfBase64 || !savedQuoteData) return;
+
+    isSendingRef.current = true;
+    setStepLoading('send');
+    try {
+      const quoteRef = savedQuoteData.reference || savedQuoteData.number || '';
+      const total = calculateTotal();
+      const depositPercent = DEPOSIT_PERCENTAGE;
+      const depositAmount = total * (depositPercent / 100);
+
+      // Récupérer la signature email du tenant
+      let tenantSignature = '';
+      try {
+        const tenant = await api.getTenantSettings();
+        const sig = tenant?.emailSignature || tenant?.email_signature;
+        if (sig) {
+          tenantSignature = `\n\n${sig}`;
+        } else {
+          const companyN = tenant?.companyName || tenant?.company_name || '';
+          const companyP = tenant?.companyPhone || tenant?.company_phone || '';
+          const companyE = tenant?.companyEmail || tenant?.company_email || '';
+          if (companyN || companyP || companyE) {
+            tenantSignature = `\n\n${companyN}${companyP ? `\n📞 ${companyP}` : ''}${companyE ? `\n✉️ ${companyE}` : ''}`;
+          }
+        }
+      } catch (_) { /* ignore */ }
+
+      const paymentSection = paymentLink
+        ? `Vous pouvez effectuer le règlement de cet acompte directement via le lien de paiement sécurisé ci-dessous :\n\n👉 ${paymentLink}`
+        : 'Le lien de paiement sera communiqué séparément.';
+
+      const message = `Bonjour ${clientName},\n\nVeuillez trouver en pièce jointe le devis relatif à l'intervention référencée "${quoteRef}".\n\nConformément à nos échanges, un acompte de ${depositPercent} %, soit un montant de ${formatCurrency(depositAmount)}, est demandé afin de valider et planifier l'intervention.\n\n${paymentSection}\n\nDès réception du paiement, l'intervention sera confirmée.\n\nNous restons bien entendu à votre disposition pour toute question ou information complémentaire.\n\nCordialement,${tenantSignature}`;
+      const subject = `Envoi de devis et lien de paiement – Acompte ${depositPercent} %`;
+
+      await api.sendQuoteWithPdf({
+        to: clientEmail.trim(),
+        subject,
+        message,
+        pdfBase64: `data:application/pdf;base64,${pdfBase64}`,
+        quoteId: savedQuoteData.id,
+      });
 
       Alert.alert(
-        'Devis créé et PDF généré !',
-        'Le PDF a été généré. Vous pouvez maintenant l\'envoyer par email.',
+        'Devis envoyé !',
+        `Le devis${signatureBase64 ? ' signé' : ''} a été envoyé par email à ${clientEmail}.${paymentLink ? '\nLe lien de paiement sécurisé est inclus.' : ''}`,
         [
           { text: 'Voir mes documents', onPress: () => navigation.navigate('MyDocuments') },
           { text: 'OK', onPress: () => navigation.goBack() },
         ]
       );
     } catch (error: any) {
-      Alert.alert('Erreur', error.message || 'Impossible de générer le PDF');
+      Alert.alert('Erreur', error.message || 'Impossible d\'envoyer le devis');
     } finally {
-      setGeneratingPdf(false);
+      setStepLoading(null);
+      isSendingRef.current = false;
     }
   };
 
@@ -442,7 +625,7 @@ export default function CreateQuoteScreen({ navigation, route }: Props) {
             <View style={styles.emptyItems}>
               <Text style={styles.emptyItemsText}>Aucun article ajouté</Text>
               <Text style={styles.emptyItemsHint}>
-                Utilisez le bouton ci-dessus ou remplissez le montant TTC
+                Ajoutez des articles avec le bouton ci-dessus
               </Text>
             </View>
           )}
@@ -458,43 +641,16 @@ export default function CreateQuoteScreen({ navigation, route }: Props) {
           </View>
         </View>
 
-        {/* Montants */}
-        <View style={styles.section}>
-          <View style={styles.row}>
-            <View style={[styles.inputGroup, { flex: 1, marginRight: 8 }]}>
-              <Text style={styles.label}>Montant TTC (€)</Text>
-              <TextInput
-                style={styles.input}
-                value={amountTTC}
-                onChangeText={setAmountTTC}
-                placeholder="0.00"
-                keyboardType="decimal-pad"
-                editable={items.length === 0}
-              />
-            </View>
-            <View style={[styles.inputGroup, { flex: 1, marginLeft: 8 }]}>
-              <Text style={styles.label}>Coût matériel (€)</Text>
-              <TextInput
-                style={styles.input}
-                value={materialCost}
-                onChangeText={setMaterialCost}
-                placeholder="0.00"
-                keyboardType="decimal-pad"
-              />
-            </View>
-          </View>
-        </View>
-
-        {/* Statut */}
+        {/* TVA */}
         <View style={styles.section}>
           <View style={styles.inputGroup}>
-            <Text style={styles.label}>Statut</Text>
+            <Text style={styles.label}>Taux de TVA</Text>
             <TouchableOpacity 
               style={styles.selectInput}
-              onPress={() => setShowStatusPicker(true)}
+              onPress={() => setShowTvaPicker(true)}
             >
               <Text style={styles.selectInputText}>
-                {STATUS_OPTIONS.find(s => s.value === status)?.label || 'Brouillon'}
+                {TVA_OPTIONS.find(t => t.value === tvaRate)?.label || '20%'}
               </Text>
               <Text style={styles.selectArrow}>▼</Text>
             </TouchableOpacity>
@@ -516,51 +672,115 @@ export default function CreateQuoteScreen({ navigation, route }: Props) {
           </View>
         </View>
 
-        {/* Total affiché */}
-        {total > 0 && (
+        {/* Récapitulatif HT / TVA / TTC / Acompte */}
+        {calculateItemsTotal() > 0 && (
           <View style={styles.totalBanner}>
-            <Text style={styles.totalBannerLabel}>Total TTC</Text>
-            <Text style={styles.totalBannerValue}>{formatCurrency(total)}</Text>
+            <View style={styles.totalBannerRow}>
+              <Text style={styles.depositBannerLabel}>Total HT</Text>
+              <Text style={styles.depositBannerValue}>{formatCurrency(calculateItemsTotal())}</Text>
+            </View>
+            <View style={styles.totalBannerRow}>
+              <Text style={styles.depositBannerLabel}>TVA ({TVA_OPTIONS.find(t => t.value === tvaRate)?.label})</Text>
+              <Text style={styles.depositBannerValue}>{formatCurrency(calculateTvaAmount())}</Text>
+            </View>
+            <View style={styles.totalBannerDivider} />
+            <View style={styles.totalBannerRow}>
+              <Text style={styles.totalBannerLabel}>Total TTC</Text>
+              <Text style={styles.totalBannerValue}>{formatCurrency(total)}</Text>
+            </View>
+            <View style={styles.totalBannerDivider} />
+            <View style={styles.totalBannerRow}>
+              <Text style={styles.depositBannerLabel}>Acompte ({DEPOSIT_PERCENTAGE}%)</Text>
+              <Text style={styles.depositBannerValue}>
+                {formatCurrency(total * DEPOSIT_PERCENTAGE / 100)}
+              </Text>
+            </View>
+            <View style={styles.totalBannerRow}>
+              <Text style={styles.depositBannerLabel}>Solde restant ({100 - DEPOSIT_PERCENTAGE}%)</Text>
+              <Text style={styles.depositBannerValue}>
+                {formatCurrency(total * (100 - DEPOSIT_PERCENTAGE) / 100)}
+              </Text>
+            </View>
           </View>
         )}
       </ScrollView>
 
+      {/* Indicateur d'étapes */}
+      <View style={styles.stepsIndicator}>
+        <View style={styles.stepDot}>
+          <View style={[styles.stepCircle, pdfBase64 ? styles.stepDone : styles.stepActive]}>
+            <Text style={styles.stepCircleText}>{pdfBase64 ? '✓' : '1'}</Text>
+          </View>
+          <Text style={styles.stepLabel}>Générer</Text>
+        </View>
+        <View style={[styles.stepLine, pdfBase64 ? styles.stepLineDone : null]} />
+        <View style={styles.stepDot}>
+          <View style={[styles.stepCircle, signatureBase64 ? styles.stepDone : (pdfBase64 ? styles.stepActive : styles.stepInactive)]}>
+            <Text style={[styles.stepCircleText, !pdfBase64 && styles.stepCircleTextInactive]}>{signatureBase64 ? '✓' : '✍️'}</Text>
+          </View>
+          <Text style={[styles.stepLabel, !pdfBase64 && styles.stepLabelInactive]}>Signer (opt.)</Text>
+        </View>
+        <View style={[styles.stepLine, pdfBase64 ? styles.stepLineDone : null]} />
+        <View style={styles.stepDot}>
+          <View style={[styles.stepCircle, pdfBase64 ? styles.stepActive : styles.stepInactive]}>
+            <Text style={[styles.stepCircleText, !pdfBase64 && styles.stepCircleTextInactive]}>3</Text>
+          </View>
+          <Text style={[styles.stepLabel, !pdfBase64 && styles.stepLabelInactive]}>Envoyer</Text>
+        </View>
+      </View>
+
       {/* Boutons d'action */}
-      <View style={styles.footer}>
-        <TouchableOpacity 
-          style={styles.cancelButton}
-          onPress={() => navigation.goBack()}
+      <View style={[styles.footer, { paddingBottom: Math.max(insets.bottom, 16) }]}>
+        {/* Bouton 1 : Générer */}
+        <TouchableOpacity
+          style={[styles.generateButton, pdfBase64 && styles.buttonDone]}
+          onPress={handleGenerate}
+          disabled={!!stepLoading}
         >
-          <Text style={styles.cancelButtonText}>Annuler</Text>
-        </TouchableOpacity>
-        
-        <TouchableOpacity 
-          style={styles.pdfButton}
-          onPress={handleGeneratePDFAndSend}
-          disabled={generatingPdf || saving}
-        >
-          {generatingPdf ? (
+          {stepLoading === 'generate' ? (
             <ActivityIndicator color="#fff" size="small" />
           ) : (
             <>
-              <Text style={styles.pdfButtonIcon}>📄</Text>
-              <Text style={styles.pdfButtonText}>Générer PDF et envoyer</Text>
+              <Text style={styles.btnIcon}>{pdfBase64 ? '✓' : '📄'}</Text>
+              <Text style={styles.btnText}>{pdfBase64 ? 'Regénérer le devis' : '1. Générer le devis'}</Text>
             </>
           )}
         </TouchableOpacity>
-        
-        <TouchableOpacity 
-          style={styles.createButton}
-          onPress={handleCreate}
-          disabled={saving || generatingPdf}
+
+        {/* Bouton 2 : Signer (optionnel) */}
+        <TouchableOpacity
+          style={[styles.signButton, !pdfBase64 && styles.buttonDisabled, signatureBase64 && styles.buttonDone]}
+          onPress={handleOpenSignature}
+          disabled={!pdfBase64 || !!stepLoading}
         >
-          {saving ? (
+          {stepLoading === 'sign' ? (
             <ActivityIndicator color="#fff" size="small" />
           ) : (
-            <Text style={styles.createButtonText}>
-              {existingQuoteId ? 'Modifier' : 'Créer le devis'}
-            </Text>
+            <>
+              <Text style={styles.btnIcon}>{signatureBase64 ? '✓' : '✍️'}</Text>
+              <Text style={styles.btnText}>{signatureBase64 ? '2. Signé' : '2. Signer (optionnel)'}</Text>
+            </>
           )}
+        </TouchableOpacity>
+
+        {/* Bouton 3 : Envoyer */}
+        <TouchableOpacity
+          style={[styles.sendButton, !pdfBase64 && styles.buttonDisabled]}
+          onPress={handleSendEmail}
+          disabled={!pdfBase64 || !!stepLoading}
+        >
+          {stepLoading === 'send' ? (
+            <ActivityIndicator color="#fff" size="small" />
+          ) : (
+            <>
+              <Text style={styles.btnIcon}>📧</Text>
+              <Text style={styles.btnText}>3. Envoyer par email</Text>
+            </>
+          )}
+        </TouchableOpacity>
+
+        <TouchableOpacity onPress={() => navigation.goBack()}>
+          <Text style={styles.cancelButtonText}>Annuler</Text>
         </TouchableOpacity>
       </View>
 
@@ -602,7 +822,7 @@ export default function CreateQuoteScreen({ navigation, route }: Props) {
                 />
               </View>
               <View style={[styles.inputGroup, { flex: 1, marginLeft: 8 }]}>
-                <Text style={styles.label}>Prix unitaire (€)</Text>
+                <Text style={styles.label}>Prix unitaire HT (€)</Text>
                 <TextInput
                   style={styles.input}
                   value={newItemPrice}
@@ -620,36 +840,81 @@ export default function CreateQuoteScreen({ navigation, route }: Props) {
         </View>
       </Modal>
 
-      {/* Modal sélection statut */}
+      {/* Modal signature */}
       <Modal
-        visible={showStatusPicker}
+        visible={showSignaturePad}
+        transparent={false}
+        animationType="slide"
+        onRequestClose={() => setShowSignaturePad(false)}
+      >
+        <SafeAreaView style={{ flex: 1, backgroundColor: '#fff' }}>
+          <View style={styles.signatureHeader}>
+            <TouchableOpacity onPress={() => setShowSignaturePad(false)}>
+              <Text style={styles.signatureCancel}>Annuler</Text>
+            </TouchableOpacity>
+            <Text style={styles.signatureTitle}>Signer le devis</Text>
+            <View style={{ width: 60 }} />
+          </View>
+          <Text style={styles.signatureHint}>Signez avec votre doigt dans la zone ci-dessous</Text>
+          <View style={{ flex: 1, margin: 16, borderRadius: 12, overflow: 'hidden', borderWidth: 2, borderColor: '#e2e8f0' }}>
+            <SignatureScreen
+              ref={signatureRef}
+              onOK={(sig: string) => handleSignatureCapture(sig)}
+              onEmpty={() => Alert.alert('Signature vide', 'Veuillez signer avant de valider.')}
+              descriptionText=""
+              clearText="Effacer"
+              confirmText="Valider"
+              webStyle={`
+                .m-signature-pad { box-shadow: none; border: none; margin: 0; }
+                .m-signature-pad--body { border: none; }
+                .m-signature-pad--body canvas { background-color: #fafafa; }
+                .m-signature-pad--footer { background-color: #fff; padding: 8px 16px; }
+                .m-signature-pad--footer .button { background-color: #3b82f6; color: #fff; border-radius: 10px; font-size: 16px; font-weight: 700; padding: 12px 24px; }
+                .m-signature-pad--footer .button.clear { background-color: #f1f5f9; color: #64748b; }
+                body,html { width: 100%; height: 100%; margin: 0; padding: 0; }
+              `}
+              autoClear={false}
+              imageType="image/png"
+              backgroundColor="rgba(250,250,250,1)"
+              penColor="#1e293b"
+              dotSize={2}
+              minWidth={2}
+              maxWidth={3}
+            />
+          </View>
+        </SafeAreaView>
+      </Modal>
+
+      {/* Modal sélection TVA */}
+      <Modal
+        visible={showTvaPicker}
         transparent
         animationType="fade"
-        onRequestClose={() => setShowStatusPicker(false)}
+        onRequestClose={() => setShowTvaPicker(false)}
       >
         <TouchableOpacity 
           style={styles.modalOverlay}
           activeOpacity={1}
-          onPress={() => setShowStatusPicker(false)}
+          onPress={() => setShowTvaPicker(false)}
         >
           <View style={styles.pickerContent}>
-            {STATUS_OPTIONS.map(option => (
+            {TVA_OPTIONS.map(option => (
               <TouchableOpacity
                 key={option.value}
                 style={[
                   styles.pickerOption,
-                  status === option.value && styles.pickerOptionSelected
+                  tvaRate === option.value && styles.pickerOptionSelected
                 ]}
                 onPress={() => {
-                  setStatus(option.value);
-                  setShowStatusPicker(false);
+                  setTvaRate(option.value);
+                  setShowTvaPicker(false);
                 }}
               >
                 <Text style={[
                   styles.pickerOptionText,
-                  status === option.value && styles.pickerOptionTextSelected
+                  tvaRate === option.value && styles.pickerOptionTextSelected
                 ]}>
-                  {option.label}
+                  TVA {option.label}
                 </Text>
               </TouchableOpacity>
             ))}
@@ -712,7 +977,7 @@ const styles = StyleSheet.create({
   },
   scrollContent: {
     padding: 16,
-    paddingBottom: 100,
+    paddingBottom: 16,
   },
   section: {
     backgroundColor: '#fff',
@@ -869,10 +1134,13 @@ const styles = StyleSheet.create({
     backgroundColor: '#dbeafe',
     borderRadius: 12,
     padding: 16,
+    marginBottom: 16,
+  },
+  totalBannerRow: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    marginBottom: 16,
+    paddingVertical: 2,
   },
   totalBannerLabel: {
     fontSize: 16,
@@ -884,60 +1152,155 @@ const styles = StyleSheet.create({
     fontWeight: '700',
     color: '#1e40af',
   },
-  footer: {
-    position: 'absolute',
-    bottom: 0,
-    left: 0,
-    right: 0,
+  totalBannerDivider: {
+    height: 1,
+    backgroundColor: '#93c5fd',
+    marginVertical: 10,
+  },
+  depositBannerLabel: {
+    fontSize: 14,
+    fontWeight: '500',
+    color: '#3b82f6',
+  },
+  depositBannerValue: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: '#3b82f6',
+  },
+  stepsIndicator: {
     flexDirection: 'row',
-    gap: 8,
-    padding: 16,
-    paddingBottom: 32,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 10,
+    paddingHorizontal: 30,
     backgroundColor: '#fff',
     borderTopWidth: 1,
     borderTopColor: '#e2e8f0',
   },
-  cancelButton: {
-    paddingVertical: 14,
+  stepDot: {
+    alignItems: 'center',
+  },
+  stepCircle: {
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  stepActive: {
+    backgroundColor: '#3b82f6',
+  },
+  stepDone: {
+    backgroundColor: '#22c55e',
+  },
+  stepInactive: {
+    backgroundColor: '#e2e8f0',
+  },
+  stepCircleText: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: '#fff',
+  },
+  stepCircleTextInactive: {
+    color: '#94a3b8',
+  },
+  stepLabel: {
+    fontSize: 10,
+    fontWeight: '600',
+    color: '#374151',
+    marginTop: 3,
+  },
+  stepLabelInactive: {
+    color: '#94a3b8',
+  },
+  stepLine: {
+    flex: 1,
+    height: 2,
+    backgroundColor: '#e2e8f0',
+    marginHorizontal: 6,
+    marginBottom: 16,
+  },
+  stepLineDone: {
+    backgroundColor: '#22c55e',
+  },
+  footer: {
+    gap: 10,
     paddingHorizontal: 16,
-    borderRadius: 8,
-    backgroundColor: '#f1f5f9',
-    borderWidth: 1,
-    borderColor: '#e2e8f0',
+    paddingTop: 12,
+    backgroundColor: '#fff',
   },
   cancelButtonText: {
     fontSize: 14,
     fontWeight: '600',
-    color: COLORS.text,
+    color: '#94a3b8',
+    textAlign: 'center',
+    paddingVertical: 4,
   },
-  pdfButton: {
-    flex: 1,
+  generateButton: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
     paddingVertical: 14,
-    borderRadius: 8,
-    backgroundColor: '#22c55e',
-    gap: 6,
+    borderRadius: 10,
+    backgroundColor: '#3b82f6',
+    gap: 8,
   },
-  pdfButtonIcon: {
+  signButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 14,
+    borderRadius: 10,
+    backgroundColor: '#f59e0b',
+    gap: 8,
+  },
+  sendButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 14,
+    borderRadius: 10,
+    backgroundColor: '#22c55e',
+    gap: 8,
+  },
+  buttonDisabled: {
+    backgroundColor: '#e2e8f0',
+  },
+  buttonDone: {
+    backgroundColor: '#16a34a',
+  },
+  btnIcon: {
     fontSize: 16,
   },
-  pdfButtonText: {
-    fontSize: 13,
-    fontWeight: '600',
+  btnText: {
+    fontSize: 15,
+    fontWeight: '700',
     color: '#fff',
   },
-  createButton: {
-    paddingVertical: 14,
-    paddingHorizontal: 20,
-    borderRadius: 8,
-    backgroundColor: '#3b82f6',
+  signatureHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+    borderBottomWidth: 1,
+    borderBottomColor: '#e2e8f0',
   },
-  createButtonText: {
+  signatureCancel: {
+    fontSize: 16,
+    color: '#ef4444',
+    fontWeight: '600',
+  },
+  signatureTitle: {
+    fontSize: 18,
+    fontWeight: '700',
+    color: COLORS.text,
+  },
+  signatureHint: {
+    textAlign: 'center',
     fontSize: 14,
-    fontWeight: '600',
-    color: '#fff',
+    color: '#64748b',
+    paddingVertical: 10,
   },
   modalOverlay: {
     flex: 1,
