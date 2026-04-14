@@ -378,7 +378,7 @@ const styles = StyleSheet.create({
   },
   infoBannerText: {
     fontSize: 13,
-    color: '#3b82f6',
+    color: '#2563eb',
     lineHeight: 18,
   },
   // Permission refusée

@@ -10,6 +10,7 @@ import {
   Linking,
   TextInput,
   Image,
+  Platform,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import * as Location from 'expo-location';
@@ -23,7 +24,7 @@ interface Props {
 }
 
 export default function InterventionDetailScreen({ route, navigation }: Props) {
-  const { interventionId } = route.params;
+  const { interventionId, openCompletionForm } = route.params as { interventionId: string; openCompletionForm?: boolean };
   const [intervention, setIntervention] = useState<any>(null);
   const [loading, setLoading] = useState(true);
   const [actionLoading, setActionLoading] = useState<string | null>(null);
@@ -33,7 +34,7 @@ export default function InterventionDetailScreen({ route, navigation }: Props) {
   const [description, setDescription] = useState('');
   const [timeSpent, setTimeSpent] = useState('');
   const [photos, setPhotos] = useState<string[]>([]);
-  const [showCompletionForm, setShowCompletionForm] = useState(false);
+  const [showCompletionForm, setShowCompletionForm] = useState(openCompletionForm === true);
 
   useEffect(() => {
     loadIntervention();
@@ -93,8 +94,8 @@ export default function InterventionDetailScreen({ route, navigation }: Props) {
           onPress: async () => {
             setActionLoading('decline');
             try {
-              await api.cancelIntervention(interventionId, 'Refusée par le technicien');
-              Alert.alert('Intervention refusée');
+              await api.declineIntervention(interventionId);
+              Alert.alert('Intervention refusée', 'Elle reste visible pour votre chef d\'équipe.');
               navigation.goBack();
             } catch (error: any) {
               Alert.alert('Erreur', error.message);
@@ -204,11 +205,20 @@ export default function InterventionDetailScreen({ route, navigation }: Props) {
 
   const openMaps = () => {
     if (intervention?.address) {
-      const address = encodeURIComponent(
-        `${intervention.address.street || ''} ${intervention.address.city || ''} ${intervention.address.postalCode || ''}`
-      );
-      const url = `https://www.google.com/maps/search/?api=1&query=${address}`;
-      Linking.openURL(url);
+      const addr = `${intervention.address.street || ''}, ${intervention.address.postalCode || ''} ${intervention.address.city || ''}`.trim();
+      const encoded = encodeURIComponent(addr);
+      const startNavAndRoute = (url: string) => {
+        Linking.openURL(url);
+        if (intervention.id && intervention.status === 'accepted') {
+          api.updateInterventionStatus(intervention.id, 'en_route').then(() => loadIntervention()).catch(() => {});
+        }
+      };
+      Alert.alert('Naviguer vers le client', addr, [
+        { text: 'Waze', onPress: () => startNavAndRoute(`https://waze.com/ul?q=${encoded}&navigate=yes`) },
+        { text: 'Plans', onPress: () => startNavAndRoute(Platform.OS === 'ios' ? `maps:?daddr=${encoded}` : `geo:0,0?q=${encoded}`) },
+        { text: 'Google Maps', onPress: () => startNavAndRoute(`https://www.google.com/maps/search/?api=1&query=${encoded}`) },
+        { text: 'Annuler', style: 'cancel' },
+      ]);
     }
   };
 
@@ -456,6 +466,106 @@ export default function InterventionDetailScreen({ route, navigation }: Props) {
           </View>
         </View>
 
+        {/* Bilan financier (visible après complétion) */}
+        {['completed', 'invoiced', 'paid'].includes(intervention.status) && (intervention.amountTTC || intervention.amountRealized || intervention.totalPaid !== undefined) && (() => {
+          const encaisse = parseFloat(intervention.totalPaid || intervention.total_paid || 0);
+          const montant = parseFloat(intervention.amountTTC || intervention.amountRealized || intervention.finalAmount || 0);
+          const commission = parseFloat(intervention.commissionPercentage || intervention.commission_percentage || 30);
+          const materialCostVal = parseFloat(intervention.materialCost || intervention.material_cost || 0);
+          const materialOwed = parseFloat(intervention.materialOwed || intervention.material_owed || 0);
+          const includesVente = intervention.includesVente ?? intervention.includes_vente ?? true;
+          const includesPose = intervention.includesPose ?? intervention.includes_pose ?? true;
+          const deductBefore = intervention.deductBeforeCommission ?? intervention.deduct_before_commission ?? false;
+          const reversalSaved = parseFloat(intervention.reversalAmount || intervention.reversal_amount || 0);
+          const remaining = parseFloat(intervention.remainingToPay || intervention.remaining_to_pay || 0);
+
+          const splitLabel = !includesVente ? 'Pose seule' : !includesPose ? 'Vente seule' : 'Vente + Pose';
+          const isSplit = !includesVente || !includesPose;
+
+          return (
+            <View style={styles.section}>
+              <Text style={styles.sectionTitle}>💰 Bilan financier</Text>
+              <View style={[styles.card, { gap: 6 }]}>
+                {montant > 0 && (
+                  <View style={styles.amountRow}>
+                    <Text style={styles.amountLabel}>Montant TTC</Text>
+                    <Text style={[styles.amountValue, { color: '#059669' }]}>{formatCurrency(montant)}</Text>
+                  </View>
+                )}
+                {encaisse > 0 && (
+                  <View style={styles.amountRow}>
+                    <Text style={styles.amountLabel}>Encaissé</Text>
+                    <Text style={[styles.amountValue, { color: '#059669' }]}>{formatCurrency(encaisse)}</Text>
+                  </View>
+                )}
+                {remaining > 0 && (
+                  <View style={styles.amountRow}>
+                    <Text style={styles.amountLabel}>Reste à payer</Text>
+                    <Text style={[styles.amountValue, { color: '#dc2626' }]}>{formatCurrency(remaining)}</Text>
+                  </View>
+                )}
+
+                {/* Séparateur */}
+                <View style={{ height: 1, backgroundColor: '#e5e7eb', marginVertical: 6 }} />
+
+                {/* Détail du calcul */}
+                <Text style={{ fontSize: 11, color: '#6b7280', fontWeight: '600', marginBottom: 4 }}>Détail reversement</Text>
+                <View style={styles.amountRow}>
+                  <Text style={styles.amountLabel}>Commission</Text>
+                  <Text style={styles.amountValue}>{commission}%</Text>
+                </View>
+                <View style={styles.amountRow}>
+                  <Text style={styles.amountLabel}>Prestation</Text>
+                  <Text style={[styles.amountValue, isSplit ? { color: '#d97706' } : {}]}>{splitLabel}{isSplit ? ' (÷2)' : ''}</Text>
+                </View>
+                {materialCostVal > 0 && (
+                  <View style={styles.amountRow}>
+                    <Text style={styles.amountLabel}>Matériel déduit{deductBefore ? ' (avant comm.)' : ''}</Text>
+                    <Text style={[styles.amountValue, { color: '#dc2626' }]}>- {formatCurrency(materialCostVal)}</Text>
+                  </View>
+                )}
+                {materialOwed > 0 && (
+                  <View style={styles.amountRow}>
+                    <Text style={styles.amountLabel}>Matériel à payer</Text>
+                    <Text style={[styles.amountValue, { color: '#059669' }]}>+ {formatCurrency(materialOwed)}</Text>
+                  </View>
+                )}
+
+                {/* Résultat */}
+                {reversalSaved > 0 && (() => {
+                  const rStatus = intervention.reversalStatus || intervention.reversal_status || 'pending';
+                  const rPaidAt = intervention.reversalPaidAt || intervention.reversal_paid_at;
+                  const statusConfig: Record<string, { label: string; bg: string; color: string }> = {
+                    pending: { label: 'En attente', bg: '#fef3c7', color: '#92400e' },
+                    validated: { label: 'Validé', bg: '#dbeafe', color: '#1d4ed8' },
+                    paid: { label: 'Payé', bg: '#dcfce7', color: '#166534' },
+                  };
+                  const sc = statusConfig[rStatus] || statusConfig.pending;
+                  return (
+                    <>
+                      <View style={{ height: 1, backgroundColor: '#e5e7eb', marginVertical: 6 }} />
+                      <View style={styles.amountRow}>
+                        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                          <Text style={[styles.amountLabel, { fontWeight: '700', fontSize: 14 }]}>Reversement</Text>
+                          <View style={{ backgroundColor: sc.bg, paddingHorizontal: 8, paddingVertical: 3, borderRadius: 6 }}>
+                            <Text style={{ fontSize: 11, fontWeight: '700', color: sc.color }}>{sc.label}</Text>
+                          </View>
+                        </View>
+                        <Text style={[styles.amountValue, { fontWeight: '800', fontSize: 16, color: '#2563eb' }]}>{formatCurrency(reversalSaved)}</Text>
+                      </View>
+                      {rStatus === 'paid' && rPaidAt && (
+                        <Text style={{ fontSize: 12, color: '#059669', marginTop: 4, textAlign: 'right' }}>
+                          Payé le {new Date(rPaidAt).toLocaleDateString('fr-FR', { day: '2-digit', month: 'long', year: 'numeric' })}
+                        </Text>
+                      )}
+                    </>
+                  );
+                })()}
+              </View>
+            </View>
+          );
+        })()}
+
         {/* Formulaire de complétion */}
         {showCompletionForm && canComplete && (
           <View style={styles.section}>
@@ -575,136 +685,142 @@ export default function InterventionDetailScreen({ route, navigation }: Props) {
               </View>
             </View>
 
-            {/* Bouton de validation */}
-            <TouchableOpacity
-              style={[styles.actionButton, styles.completeButton, { marginTop: 16 }]}
-              onPress={handleComplete}
-              disabled={actionLoading === 'complete'}
-            >
-              {actionLoading === 'complete' ? (
-                <ActivityIndicator color="#fff" />
-              ) : (
-                <Text style={styles.actionButtonText}>✓ Terminer l'intervention</Text>
-              )}
-            </TouchableOpacity>
           </View>
         )}
 
-        <View style={{ height: 120 }} />
+        <View style={{ height: ['completed', 'cancelled', 'paid', 'invoiced'].includes(status) ? 40 : 120 }} />
       </ScrollView>
 
-      {/* Actions */}
+      {/* Actions — masquées pour les interventions terminées/annulées */}
+      {!['completed', 'cancelled', 'paid', 'invoiced'].includes(status) && (
       <View style={styles.actionsContainer}>
-        {canAccept && (
-          <View style={styles.actionsRow}>
-            <TouchableOpacity
-              style={[styles.actionButton, styles.declineButton]}
-              onPress={handleDecline}
-              disabled={actionLoading !== null}
-            >
-              {actionLoading === 'decline' ? (
-                <ActivityIndicator color={COLORS.danger} />
-              ) : (
-                <Text style={styles.declineButtonText}>✕ Refuser</Text>
-              )}
-            </TouchableOpacity>
-            <TouchableOpacity
-              style={[styles.actionButton, styles.acceptButton]}
-              onPress={handleAccept}
-              disabled={actionLoading !== null}
-            >
-              {actionLoading === 'accept' ? (
-                <ActivityIndicator color="#fff" />
-              ) : (
-                <Text style={styles.actionButtonText}>✓ Accepter</Text>
-              )}
-            </TouchableOpacity>
-          </View>
-        )}
-
-        {canStartRoute && (
-          <TouchableOpacity
-            style={[styles.actionButton, styles.primaryButton]}
-            onPress={() => handleStatusChange('en_route')}
-            disabled={actionLoading !== null}
-          >
-            {actionLoading === 'en_route' ? (
-              <ActivityIndicator color="#fff" />
-            ) : (
-              <Text style={styles.actionButtonText}>🚗 Je suis en route</Text>
-            )}
-          </TouchableOpacity>
-        )}
-
-        {canArriveOnSite && (
-          <TouchableOpacity
-            style={[styles.actionButton, styles.primaryButton]}
-            onPress={() => handleStatusChange('on_site')}
-            disabled={actionLoading !== null}
-          >
-            {actionLoading === 'on_site' ? (
-              <ActivityIndicator color="#fff" />
-            ) : (
-              <Text style={styles.actionButtonText}>📍 Je suis arrivé</Text>
-            )}
-          </TouchableOpacity>
-        )}
-
-        {canComplete && !showCompletionForm && (
+        {showCompletionForm ? (
           <TouchableOpacity
             style={[styles.actionButton, styles.completeButton]}
-            onPress={() => setShowCompletionForm(true)}
+            onPress={handleComplete}
+            disabled={actionLoading === 'complete'}
           >
-            <Text style={styles.actionButtonText}>✓ Terminer l'intervention</Text>
+            {actionLoading === 'complete' ? (
+              <ActivityIndicator color="#fff" />
+            ) : (
+              <Text style={styles.actionButtonText}>✓ Terminer l'intervention</Text>
+            )}
           </TouchableOpacity>
-        )}
+        ) : (
+          <>
+            {canAccept && (
+              <View style={styles.actionsRow}>
+                <TouchableOpacity
+                  style={[styles.actionButton, styles.declineButton]}
+                  onPress={handleDecline}
+                  disabled={actionLoading !== null}
+                >
+                  {actionLoading === 'decline' ? (
+                    <ActivityIndicator color={COLORS.danger} />
+                  ) : (
+                    <Text style={styles.declineButtonText}>✕ Refuser</Text>
+                  )}
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={[styles.actionButton, styles.acceptButton]}
+                  onPress={handleAccept}
+                  disabled={actionLoading !== null}
+                >
+                  {actionLoading === 'accept' ? (
+                    <ActivityIndicator color="#fff" />
+                  ) : (
+                    <Text style={styles.actionButtonText}>✓ Accepter</Text>
+                  )}
+                </TouchableOpacity>
+              </View>
+            )}
 
-        {/* Bouton Message - lié à l'intervention */}
-        <TouchableOpacity
-          style={styles.messageButton}
-          onPress={() => navigation.navigate('Messaging', {
-            interventionId,
-            interventionRef: intervention.reference,
-          })}
-        >
-          <Text style={styles.messageButtonText}>💬 Message ({intervention.reference})</Text>
-        </TouchableOpacity>
+            {canStartRoute && (
+              <TouchableOpacity
+                style={[styles.actionButton, styles.primaryButton]}
+                onPress={() => handleStatusChange('en_route')}
+                disabled={actionLoading !== null}
+              >
+                {actionLoading === 'en_route' ? (
+                  <ActivityIndicator color="#fff" />
+                ) : (
+                  <Text style={styles.actionButtonText}>🚗 Je suis en route</Text>
+                )}
+              </TouchableOpacity>
+            )}
 
-        {/* Boutons Devis et Facture - toujours visibles */}
-        <View style={styles.billingButtonsRow}>
-          <TouchableOpacity
-            style={[styles.billingButton, styles.quoteButton]}
-            onPress={() => navigation.navigate('CreateQuote', { interventionId, intervention })}
-          >
-            <Text style={styles.quoteButtonText}>📄 Devis</Text>
-          </TouchableOpacity>
-          
-          <TouchableOpacity
-            style={[styles.billingButton, styles.invoiceButton]}
-            onPress={() => navigation.navigate('CreateInvoice', { interventionId, intervention })}
-          >
-            <Text style={styles.invoiceButtonText}>🧾 Facture</Text>
-          </TouchableOpacity>
-        </View>
+            {canArriveOnSite && (
+              <TouchableOpacity
+                style={[styles.actionButton, styles.primaryButton]}
+                onPress={() => handleStatusChange('on_site')}
+                disabled={actionLoading !== null}
+              >
+                {actionLoading === 'on_site' ? (
+                  <ActivityIndicator color="#fff" />
+                ) : (
+                  <Text style={styles.actionButtonText}>📍 Je suis arrivé</Text>
+                )}
+              </TouchableOpacity>
+            )}
 
-        {/* Afficher le devis/facture existant si présent */}
-        {intervention?.quoteId && (
-          <TouchableOpacity
-            style={styles.existingDocButton}
-            onPress={() => navigation.navigate('QuoteDetail', { quoteId: intervention.quoteId })}
-          >
-            <Text style={styles.existingDocText}>📄 Voir le devis</Text>
-          </TouchableOpacity>
-        )}
-        {intervention?.invoiceId && (
-          <TouchableOpacity
-            style={styles.existingDocButton}
-            onPress={() => navigation.navigate('InvoiceDetail', { invoiceId: intervention.invoiceId })}
-          >
-            <Text style={styles.existingDocText}>🧾 Voir la facture</Text>
-          </TouchableOpacity>
+            {canComplete && (
+              <TouchableOpacity
+                style={[styles.actionButton, styles.completeButton]}
+                onPress={() => setShowCompletionForm(true)}
+              >
+                <Text style={styles.actionButtonText}>✓ Terminer l'intervention</Text>
+              </TouchableOpacity>
+            )}
+
+            {/* Bouton Message - lié à l'intervention */}
+            <TouchableOpacity
+              style={styles.messageButton}
+              onPress={() => navigation.navigate('Messaging', {
+                interventionId,
+                interventionRef: intervention.reference,
+              })}
+            >
+              <Text style={styles.messageButtonText}>💬 Message ({intervention.reference})</Text>
+            </TouchableOpacity>
+
+            {/* Boutons Devis et Facture */}
+            <View style={styles.billingButtonsRow}>
+              <TouchableOpacity
+                style={[styles.billingButton, styles.quoteButton]}
+                onPress={() => navigation.navigate('CreateQuote', { interventionId, intervention })}
+              >
+                <Text style={styles.quoteButtonText}>📄 Devis</Text>
+              </TouchableOpacity>
+              
+              <TouchableOpacity
+                style={[styles.billingButton, styles.invoiceButton]}
+                onPress={() => navigation.navigate('CreateInvoice', { interventionId, intervention })}
+              >
+                <Text style={styles.invoiceButtonText}>🧾 Facture</Text>
+              </TouchableOpacity>
+            </View>
+
+            {/* Afficher le devis/facture existant si présent */}
+            {intervention?.quoteId && (
+              <TouchableOpacity
+                style={styles.existingDocButton}
+                onPress={() => navigation.navigate('QuoteDetail', { quoteId: intervention.quoteId })}
+              >
+                <Text style={styles.existingDocText}>📄 Voir le devis</Text>
+              </TouchableOpacity>
+            )}
+            {intervention?.invoiceId && (
+              <TouchableOpacity
+                style={styles.existingDocButton}
+                onPress={() => navigation.navigate('InvoiceDetail', { invoiceId: intervention.invoiceId })}
+              >
+                <Text style={styles.existingDocText}>🧾 Voir la facture</Text>
+              </TouchableOpacity>
+            )}
+          </>
         )}
       </View>
+      )}
     </SafeAreaView>
   );
 }
@@ -729,7 +845,9 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     paddingHorizontal: 20,
     paddingVertical: 16,
-    backgroundColor: COLORS.primary,
+    backgroundColor: '#ffffff',
+    borderBottomWidth: 1,
+    borderBottomColor: COLORS.border,
   },
   // Styles pour la barre de progression
   progressContainer: {
@@ -737,14 +855,10 @@ const styles = StyleSheet.create({
     paddingVertical: 20,
     paddingHorizontal: 16,
     marginHorizontal: 20,
-    marginTop: -12,
-    borderRadius: 16,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.1,
-    shadowRadius: 12,
-    elevation: 5,
-    zIndex: 10,
+    marginTop: 16,
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: COLORS.border,
   },
   progressBar: {
     flexDirection: 'row',
@@ -806,7 +920,7 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   backButtonText: {
-    color: '#fff',
+    color: COLORS.primary,
     fontSize: 17,
     fontWeight: '600',
   },
@@ -821,20 +935,20 @@ const styles = StyleSheet.create({
     fontWeight: '600',
   },
   referenceContainer: {
-    backgroundColor: COLORS.primary,
+    backgroundColor: '#ffffff',
     paddingHorizontal: 20,
-    paddingBottom: 24,
-    borderBottomLeftRadius: 24,
-    borderBottomRightRadius: 24,
+    paddingBottom: 20,
+    borderBottomWidth: 1,
+    borderBottomColor: COLORS.border,
   },
   reference: {
-    fontSize: 28,
+    fontSize: 24,
     fontWeight: 'bold',
-    color: '#fff',
+    color: COLORS.primary,
   },
   type: {
     fontSize: 16,
-    color: '#bfdbfe',
+    color: COLORS.textMuted,
     marginTop: 4,
   },
   section: {
@@ -851,13 +965,10 @@ const styles = StyleSheet.create({
   },
   card: {
     backgroundColor: COLORS.card,
-    borderRadius: 16,
+    borderRadius: 14,
     padding: 16,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.05,
-    shadowRadius: 8,
-    elevation: 2,
+    borderWidth: 1,
+    borderColor: COLORS.border,
   },
   clientName: {
     fontSize: 18,
@@ -1008,7 +1119,7 @@ const styles = StyleSheet.create({
   messageButton: {
     backgroundColor: '#eff6ff',
     borderWidth: 2,
-    borderColor: '#3b82f6',
+    borderColor: '#2563eb',
     paddingVertical: 14,
     borderRadius: 14,
     alignItems: 'center',
@@ -1144,7 +1255,7 @@ const styles = StyleSheet.create({
   },
   photoButton: {
     flex: 1,
-    backgroundColor: '#3b82f6',
+    backgroundColor: '#2563eb',
     paddingVertical: 10,
     borderRadius: 10,
     alignItems: 'center',
@@ -1157,10 +1268,10 @@ const styles = StyleSheet.create({
   photoButtonOutline: {
     backgroundColor: '#fff',
     borderWidth: 1.5,
-    borderColor: '#3b82f6',
+    borderColor: '#2563eb',
   },
   photoButtonOutlineText: {
-    color: '#3b82f6',
+    color: '#2563eb',
     fontSize: 14,
     fontWeight: '600',
   },

@@ -11,12 +11,17 @@ import {
   Modal,
   Dimensions,
   ActivityIndicator,
+  Linking,
+  Platform,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useAuth } from '../../contexts/AuthContext';
 import api from '../../services/api';
 import { COLORS, STATUS_COLORS, STATUS_LABELS, TYPE_LABELS, API_BASE_URL } from '../../config/api';
 import * as SecureStore from 'expo-secure-store';
+import * as Location from 'expo-location';
+import * as ImagePicker from 'expo-image-picker';
+import { Image, KeyboardAvoidingView } from 'react-native';
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
 
@@ -41,8 +46,10 @@ interface Intervention {
   type: string;
   status: string;
   clientName?: string;
-  client?: { name?: string };
-  address?: { city?: string; street?: string };
+  clientPhone?: string;
+  clientEmail?: string;
+  client?: { name?: string; phone?: string };
+  address?: { city?: string; street?: string; postalCode?: string };
   amountTTC?: number;
   scheduledDate?: string;
   scheduledAt?: string;
@@ -56,6 +63,7 @@ interface Stats {
   totalInterventions: number;
   totalRevenue: number;
   netProfit: number;
+  totalToReceive: number;
   totalToPayTechnicians: number;
   commissionFromAdmin?: number;
   billingType?: string;
@@ -66,6 +74,7 @@ interface Stats {
     revenue: number;
     commissionPercentage: number;
     toPay: number;
+    isTL?: boolean;
   }>;
 }
 
@@ -82,7 +91,7 @@ interface TeamLeader {
   activityIds?: string[];
 }
 
-type MainView = 'stats' | 'technicians' | 'settings';
+type MainView = 'stats' | 'interventions' | 'technicians' | 'settings';
 
 export default function TeamLeaderHomeScreen({ navigation }: any) {
   const { user, logout } = useAuth();
@@ -98,6 +107,7 @@ export default function TeamLeaderHomeScreen({ navigation }: any) {
     totalInterventions: 0,
     totalRevenue: 0,
     netProfit: 0,
+    totalToReceive: 0,
     totalToPayTechnicians: 0,
   });
   const [refreshing, setRefreshing] = useState(false);
@@ -116,6 +126,40 @@ export default function TeamLeaderHomeScreen({ navigation }: any) {
   const [showInterventionsModal, setShowInterventionsModal] = useState(false);
   const [showRevenueModal, setShowRevenueModal] = useState(false);
   const [showProfitModal, setShowProfitModal] = useState(false);
+
+  // Modale d'assignation intervention → technicien
+  const [showAssignModal, setShowAssignModal] = useState(false);
+  const [assigningInterventionId, setAssigningInterventionId] = useState<string | null>(null);
+  const [assigning, setAssigning] = useState(false);
+
+  // Modification nom affiché
+  const [editingName, setEditingName] = useState(false);
+  const [newName, setNewName] = useState('');
+  const [savingName, setSavingName] = useState(false);
+
+  // Modale d'annulation intervention
+  const [showCancelModal, setShowCancelModal] = useState(false);
+  const [cancellingInterventionId, setCancellingInterventionId] = useState<string | null>(null);
+  const [cancelling, setCancelling] = useState(false);
+  const [selectedCancelReason, setSelectedCancelReason] = useState<string | null>(null);
+  const CANCEL_REASONS = [
+    'Client ne répond pas',
+    'Client annule',
+    'Adresse introuvable',
+    'Problème technique',
+    'Doublon d\'intervention',
+  ];
+
+  // Modale de complétion d'intervention
+  const [showCompleteModal, setShowCompleteModal] = useState(false);
+  const [completingInterventionId, setCompletingInterventionId] = useState<string | null>(null);
+  const [completing, setCompleting] = useState(false);
+  const [cFinalAmount, setCFinalAmount] = useState('');
+  const [cMaterialCost, setCMaterialCost] = useState('');
+  const [cTimeSpent, setCTimeSpent] = useState('');
+  const [cDescription, setCDescription] = useState('');
+  const [cNotes, setCNotes] = useState('');
+  const [cPhotos, setCPhotos] = useState<string[]>([]);
 
   // Afficher TOUS les techniciens (pas seulement ceux avec secteurs validés)
   const validatedTechnicians = useMemo(() => {
@@ -258,7 +302,15 @@ export default function TeamLeaderHomeScreen({ navigation }: any) {
       });
 
       setTechnicians(Array.isArray(techData) ? techData : (techData?.data || []));
-      setInterventions(interventionsData);
+      // Filtrer les interventions refusées par cet utilisateur
+      const myUserId = user?.id;
+      const filteredInterventions = myUserId
+        ? interventionsData.filter((i: any) => {
+            const declined: string[] = i.declinedBy || i.declined_by || [];
+            return !declined.includes(myUserId);
+          })
+        : interventionsData;
+      setInterventions(filteredInterventions);
       setAssignments(Array.isArray(assignmentsData) ? assignmentsData : []);
       // Map activity IDs to names: priorité au tableau activities fourni par GET /team-leaders/me
       const actsFromTl = Array.isArray(tl?.activities) ? tl.activities : [];
@@ -317,26 +369,47 @@ export default function TeamLeaderHomeScreen({ navigation }: any) {
           return sum + amount;
         }, 0);
 
-      // Calculer le montant à verser aux techniciens
+      // Identifier le profil technicien du TL lui-même (pour exclure ses propres interventions du "à verser")
+      const tlTechProfile = techArray.find((t: any) => (t.userId || t.user_id) === tl.userId);
+      const tlTechId = tlTechProfile?.id;
+
+      // Calculer le montant à verser aux techniciens (exclure le TL lui-même, exclure les déjà payés)
       let totalToPayTechnicians = 0;
       completedInterventions.forEach((intervention: any) => {
-        // Trouver le technicien qui a fait cette intervention
-        const tech = techArray.find((t: any) => t.id === intervention.technicianId);
-        const amount = parseFloat(intervention.amountTTC) || parseFloat(intervention.amountRealized) || 0;
-        const techCommission = tech ? (parseFloat(tech.commissionPercentage) || 30) : 30;
-        const techEarning = amount * (techCommission / 100);
-        totalToPayTechnicians += techEarning;
-        console.log(`[TL Stats Debug] Tech ${intervention.technicianId}: ${amount} * ${techCommission}% = ${techEarning}`);
+        // Exclure les interventions faites par le TL lui-même
+        if (tlTechId && intervention.technicianId === tlTechId) return;
+        const reversalStatus = intervention.reversalStatus || intervention.reversal_status;
+        // Exclure les déjà payés
+        if (reversalStatus === 'paid') return;
+        const reversalAmount = parseFloat(intervention.reversalAmount || intervention.reversal_amount) || 0;
+        if (reversalAmount > 0) {
+          totalToPayTechnicians += reversalAmount;
+        } else {
+          const tech = techArray.find((t: any) => t.id === intervention.technicianId);
+          const amount = parseFloat(intervention.amountTTC) || parseFloat(intervention.amountRealized) || 0;
+          const techCommission = tech ? (parseFloat(tech.commissionPercentage) || 30) : 30;
+          totalToPayTechnicians += amount * (techCommission / 100);
+        }
       });
 
       const commissionRate = tl.commissionFromAdmin != null ? parseFloat(String(tl.commissionFromAdmin)) : 0;
-      const netProfit = totalRevenue * (commissionRate / 100) - totalToPayTechnicians;
+
+      // "À recevoir" de l'admin = commission TL sur interventions non encore payées (pending + validated)
+      let totalToReceive = 0;
+      completedInterventions.forEach((intervention: any) => {
+        const rStatus = intervention.reversalStatus || intervention.reversal_status;
+        if (rStatus === 'paid') return; // Déjà payé
+        const amount = parseFloat(intervention.amountTTC) || parseFloat(intervention.amountRealized) || 0;
+        totalToReceive += amount * (commissionRate / 100);
+      });
+
+      const netProfit = Math.max(0, totalToReceive - totalToPayTechnicians);
 
       console.log(`[TL Stats] CA: ${totalRevenue}, Commission TL: ${commissionRate}%, À verser techs: ${totalToPayTechnicians}, Profit: ${netProfit}`);
 
       // Calculer les stats par technicien LOCALEMENT (au lieu de l'API qui renvoie 0)
-      const techStatsMap = new Map<string, { id: string; name: string; interventionsCount: number; revenue: number; commissionPercentage: number; toPay: number }>();
-      
+      const techStatsMap = new Map<string, { id: string; name: string; interventionsCount: number; revenue: number; commissionPercentage: number; toPay: number; isTL: boolean }>();
+
       // Initialiser chaque technicien
       techArray.forEach((tech: any) => {
         techStatsMap.set(tech.id, {
@@ -346,6 +419,7 @@ export default function TeamLeaderHomeScreen({ navigation }: any) {
           revenue: 0,
           commissionPercentage: parseFloat(tech.commissionPercentage) || 30,
           toPay: 0,
+          isTL: tech.id === tlTechId,
         });
       });
 
@@ -353,11 +427,22 @@ export default function TeamLeaderHomeScreen({ navigation }: any) {
       completedInterventions.forEach((intervention: any) => {
         const techId = intervention.technicianId;
         const amount = parseFloat(intervention.amountTTC) || parseFloat(intervention.amountRealized) || 0;
+        const reversalStatus = intervention.reversalStatus || intervention.reversal_status;
         const existing = techStatsMap.get(techId);
         if (existing) {
           existing.interventionsCount += 1;
           existing.revenue += amount;
-          existing.toPay = existing.revenue * (existing.commissionPercentage / 100);
+          // Seulement les interventions non encore payées (pending ou validated)
+          if (reversalStatus !== 'paid') {
+            if (techId === tlTechId) {
+              // TL lui-même : "à recevoir" de l'admin = montant × commission admin
+              existing.toPay += amount * (commissionRate / 100);
+            } else {
+              // Autre tech : "à verser" par le TL
+              const reversalAmt = parseFloat(intervention.reversalAmount || intervention.reversal_amount) || 0;
+              existing.toPay += reversalAmt > 0 ? reversalAmt : amount * (existing.commissionPercentage / 100);
+            }
+          }
         }
       });
 
@@ -370,6 +455,7 @@ export default function TeamLeaderHomeScreen({ navigation }: any) {
         totalInterventions: (interventionsData || []).length,
         totalRevenue,
         netProfit: Math.max(0, netProfit),
+        totalToReceive,
         totalToPayTechnicians,
         commissionFromAdmin: tl.commissionFromAdmin != null ? parseFloat(String(tl.commissionFromAdmin)) : undefined,
         billingType: tl.billingType,
@@ -442,9 +528,7 @@ export default function TeamLeaderHomeScreen({ navigation }: any) {
   const handleAcceptIntervention = async (interventionId: string) => {
     try {
       await api.acceptIntervention(interventionId);
-      // Naviguer vers le détail pour le suivi
-      navigation.navigate('InterventionDetail', { interventionId });
-      loadData();
+      await loadData();
     } catch (error: any) {
       logErrorDetailed({
         file: 'src/screens/teamleader/TeamLeaderHomeScreen.tsx',
@@ -457,6 +541,154 @@ export default function TeamLeaderHomeScreen({ navigation }: any) {
       });
       Alert.alert('Erreur', error.message || 'Impossible d\'accepter');
     }
+  };
+
+  const openNavigationChoice = (address: { street?: string; postalCode?: string; city?: string }, interventionId?: string) => {
+    const addr = `${address.street || ''}, ${address.postalCode || ''} ${address.city || ''}`.trim();
+    const encoded = encodeURIComponent(addr);
+    const startNavAndRoute = (url: string) => {
+      Linking.openURL(url);
+      if (interventionId) {
+        api.updateInterventionStatus(interventionId, 'en_route').then(() => loadData()).catch(() => {});
+      }
+    };
+    Alert.alert('Naviguer vers le client', addr, [
+      { text: 'Waze', onPress: () => startNavAndRoute(`https://waze.com/ul?q=${encoded}&navigate=yes`) },
+      { text: 'Plans', onPress: () => startNavAndRoute(Platform.OS === 'ios' ? `maps:?daddr=${encoded}` : `geo:0,0?q=${encoded}`) },
+      { text: 'Google Maps', onPress: () => startNavAndRoute(`https://www.google.com/maps/search/?api=1&query=${encoded}`) },
+      { text: 'Annuler', style: 'cancel' },
+    ]);
+  };
+
+  const handleOpenAssignModal = (interventionId: string) => {
+    setAssigningInterventionId(interventionId);
+    setShowAssignModal(true);
+  };
+
+  const handleAssignToTech = async (technicianId: string) => {
+    if (!assigningInterventionId) return;
+    setAssigning(true);
+    try {
+      await api.assignInterventionToTech(assigningInterventionId, technicianId);
+      setShowAssignModal(false);
+      setAssigningInterventionId(null);
+      Alert.alert('Intervention envoyée', 'Le technicien va recevoir une notification.');
+      loadData();
+    } catch (error: any) {
+      Alert.alert('Erreur', error.message || 'Impossible d\'assigner l\'intervention');
+    } finally {
+      setAssigning(false);
+    }
+  };
+
+  const handleOpenCancelModal = (interventionId: string) => {
+    setCancellingInterventionId(interventionId);
+    setSelectedCancelReason(null);
+    setShowCancelModal(true);
+  };
+
+  const handleSaveName = async () => {
+    const trimmed = newName.trim();
+    if (!trimmed || trimmed === teamLeader?.name) {
+      setEditingName(false);
+      return;
+    }
+    setSavingName(true);
+    try {
+      await api.updateMyTLProfile({ name: trimmed });
+      setTeamLeader(prev => prev ? { ...prev, name: trimmed } : prev);
+      setEditingName(false);
+      Alert.alert('Succès', 'Votre nom a été mis à jour.');
+    } catch {
+      Alert.alert('Erreur', 'Impossible de mettre à jour le nom.');
+    } finally {
+      setSavingName(false);
+    }
+  };
+
+  const handleCancelIntervention = async () => {
+    if (!cancellingInterventionId || !selectedCancelReason) return;
+    setCancelling(true);
+    try {
+      await api.declineIntervention(cancellingInterventionId, selectedCancelReason);
+      setShowCancelModal(false);
+      setCancellingInterventionId(null);
+      setSelectedCancelReason(null);
+      Alert.alert('Intervention refusée', 'L\'intervention n\'est plus visible pour vous. L\'admin en est informé.');
+      loadData();
+    } catch (error: any) {
+      Alert.alert('Erreur', error.message || 'Impossible de refuser l\'intervention');
+    } finally {
+      setCancelling(false);
+    }
+  };
+
+  const handleOpenCompleteModal = (interventionId: string) => {
+    setCompletingInterventionId(interventionId);
+    setCFinalAmount('');
+    setCMaterialCost('');
+    setCTimeSpent('');
+    setCDescription('');
+    setCNotes('');
+    setCPhotos([]);
+    setShowCompleteModal(true);
+  };
+
+  const handleCompleteIntervention = async () => {
+    if (!completingInterventionId || !cFinalAmount || parseFloat(cFinalAmount) <= 0) {
+      Alert.alert('Erreur', 'Veuillez entrer un montant final valide');
+      return;
+    }
+    setCompleting(true);
+    try {
+      let location: { lat: number; lng: number } | undefined;
+      try {
+        const { status } = await Location.requestForegroundPermissionsAsync();
+        if (status === 'granted') {
+          const loc = await Location.getCurrentPositionAsync({});
+          location = { lat: loc.coords.latitude, lng: loc.coords.longitude };
+        }
+      } catch {}
+
+      const completionData: any = {
+        amountTTC: parseFloat(cFinalAmount),
+        amountRealized: parseFloat(cFinalAmount),
+        notes: cNotes || undefined,
+        description: cDescription || undefined,
+        completedAt: new Date().toISOString(),
+        location,
+      };
+      if (cMaterialCost) {
+        completionData.materialCost = parseFloat(cMaterialCost);
+        completionData.materialCostSelf = parseFloat(cMaterialCost);
+      }
+      if (cTimeSpent) completionData.timeSpent = parseFloat(cTimeSpent);
+      if (cPhotos.length > 0) completionData.photos = cPhotos;
+
+      await api.completeIntervention(completingInterventionId, completionData);
+      setShowCompleteModal(false);
+      setCompletingInterventionId(null);
+      const amt = parseFloat(cFinalAmount);
+      const mat = parseFloat(cMaterialCost) || 0;
+      Alert.alert('Intervention terminée !', `Montant : ${amt.toFixed(2)} €${mat > 0 ? `\nMatériel : ${mat.toFixed(2)} €` : ''}${cPhotos.length > 0 ? `\n${cPhotos.length} photo(s)` : ''}`);
+      loadData();
+    } catch (error: any) {
+      Alert.alert('Erreur', error.message || 'Impossible de terminer l\'intervention');
+    } finally {
+      setCompleting(false);
+    }
+  };
+
+  const cTakePhoto = async () => {
+    const { status } = await ImagePicker.requestCameraPermissionsAsync();
+    if (status !== 'granted') { Alert.alert('Permission requise', 'Accès caméra nécessaire.'); return; }
+    const result = await ImagePicker.launchCameraAsync({ mediaTypes: ['images'], quality: 0.7 });
+    if (!result.canceled && result.assets[0]) setCPhotos(prev => [...prev, result.assets[0].uri]);
+  };
+
+  const cPickPhoto = async () => {
+    const result = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ['images'], quality: 0.7, allowsMultipleSelection: true, selectionLimit: 5 });
+    if (!result.canceled && result.assets.length > 0) setCPhotos(prev => [...prev, ...result.assets.map(a => a.uri)]);
   };
 
   const handleSaveCommission = async (technicianId: string) => {
@@ -612,10 +844,31 @@ export default function TeamLeaderHomeScreen({ navigation }: any) {
                   {formatCurrency(stats.netProfit || 0)}
                 </Text>
                 <Text style={styles.statLabel}>Profit net</Text>
+                <Text style={[styles.statSublabel, styles.greenText]}>
+                  À recevoir: {formatCurrency(stats.totalToReceive || 0)}
+                </Text>
                 <Text style={[styles.statSublabel, styles.orangeText]}>
                   À verser: {formatCurrency(stats.totalToPayTechnicians || 0)}
                 </Text>
                 <Text style={styles.tapHint}>Appuyer pour détails</Text>
+              </TouchableOpacity>
+            </View>
+
+            {/* Raccourcis équipe */}
+            <View style={{ flexDirection: 'row', gap: 10, marginBottom: 16 }}>
+              <TouchableOpacity
+                style={{ flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6, paddingVertical: 12, borderRadius: 12, backgroundColor: '#eff6ff', borderWidth: 1, borderColor: '#bfdbfe' }}
+                onPress={() => navigation.navigate('InviteTechnician')}
+              >
+                <Text style={{ fontSize: 14 }}>➕</Text>
+                <Text style={{ fontSize: 13, fontWeight: '600', color: COLORS.primary }}>Inviter un tech</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={{ flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6, paddingVertical: 12, borderRadius: 12, backgroundColor: '#fff', borderWidth: 1, borderColor: COLORS.border }}
+                onPress={() => setMainView('technicians')}
+              >
+                <Text style={{ fontSize: 14 }}>👥</Text>
+                <Text style={{ fontSize: 13, fontWeight: '600', color: COLORS.text }}>Mon équipe</Text>
               </TouchableOpacity>
             </View>
 
@@ -630,10 +883,9 @@ export default function TeamLeaderHomeScreen({ navigation }: any) {
                     : ['on_site', 'in_progress'].includes(intervention.status) ? 3 : 0;
                   
                   return (
-                    <TouchableOpacity 
+                    <View 
                       key={intervention.id} 
                       style={[styles.interventionCard, styles.activeInterventionCard]}
-                      onPress={() => navigation.navigate('InterventionDetail', { interventionId: intervention.id })}
                     >
                       {/* Mini barre de progression */}
                       <View style={styles.miniProgressBar}>
@@ -669,12 +921,105 @@ export default function TeamLeaderHomeScreen({ navigation }: any) {
                       {(intervention.clientName || intervention.client?.name) && (
                         <Text style={styles.interventionClient}>👤 {intervention.clientName || intervention.client?.name}</Text>
                       )}
-                      {intervention.address?.city && (
-                        <Text style={styles.interventionAddress}>📍 {intervention.address.city}</Text>
+                      {(intervention.address?.street || intervention.address?.city) && (
+                        <Text style={styles.interventionAddress}>📍 {[intervention.address?.street, [intervention.address?.postalCode, intervention.address?.city].filter(Boolean).join(' ')].filter(Boolean).join(', ')}</Text>
                       )}
+                      {intervention.amount && (
+                        <Text style={{ fontSize: 15, fontWeight: '700', color: '#059669', marginTop: 4 }}>{intervention.amount} €</Text>
+                      )}
+
+                      {/* Boutons d'actions rapides */}
+                      <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginTop: 10 }}>
+                        {validatedTechnicians.length > 0 && (
+                          <TouchableOpacity
+                            onPress={() => handleOpenAssignModal(intervention.id)}
+                            style={{ flexDirection: 'row', alignItems: 'center', paddingHorizontal: 10, paddingVertical: 6, borderRadius: 8, borderWidth: 1, borderColor: '#2563eb', backgroundColor: '#f5f3ff' }}
+                          >
+                            <Text style={{ fontSize: 13, marginRight: 4 }}>📤</Text>
+                            <Text style={{ fontSize: 11, fontWeight: '600', color: '#2563eb' }}>Transférer</Text>
+                          </TouchableOpacity>
+                        )}
+                        {(intervention.clientPhone || intervention.client?.phone) && (
+                          <TouchableOpacity
+                            onPress={() => Linking.openURL(`tel:${intervention.clientPhone || intervention.client?.phone}`)}
+                            style={{ flexDirection: 'row', alignItems: 'center', paddingHorizontal: 10, paddingVertical: 6, borderRadius: 8, borderWidth: 1, borderColor: '#059669', backgroundColor: '#ecfdf5' }}
+                          >
+                            <Text style={{ fontSize: 13, marginRight: 4 }}>📞</Text>
+                            <Text style={{ fontSize: 11, fontWeight: '600', color: '#059669' }}>Appeler</Text>
+                          </TouchableOpacity>
+                        )}
+                        {(intervention.address?.street || intervention.address?.city) && (
+                          <TouchableOpacity
+                            onPress={() => openNavigationChoice(intervention.address, intervention.id)}
+                            style={{ flexDirection: 'row', alignItems: 'center', paddingHorizontal: 10, paddingVertical: 6, borderRadius: 8, borderWidth: 1, borderColor: '#2563eb', backgroundColor: '#eff6ff' }}
+                          >
+                            <Text style={{ fontSize: 13, marginRight: 4 }}>🗺️</Text>
+                            <Text style={{ fontSize: 11, fontWeight: '600', color: '#2563eb' }}>Naviguer</Text>
+                          </TouchableOpacity>
+                        )}
+                        <TouchableOpacity
+                          onPress={() => handleOpenCancelModal(intervention.id)}
+                          style={{ flexDirection: 'row', alignItems: 'center', paddingHorizontal: 10, paddingVertical: 6, borderRadius: 8, borderWidth: 1, borderColor: '#dc2626', backgroundColor: '#fef2f2' }}
+                        >
+                          <Text style={{ fontSize: 13, marginRight: 4 }}>❌</Text>
+                          <Text style={{ fontSize: 11, fontWeight: '600', color: '#dc2626' }}>Annuler</Text>
+                        </TouchableOpacity>
+                      </View>
+                      <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginTop: 6 }}>
+                        <TouchableOpacity
+                          onPress={() => navigation.navigate('CreateQuote', { interventionId: intervention.id, intervention })}
+                          style={{ flex: 1, minWidth: '40%', flexDirection: 'row', alignItems: 'center', justifyContent: 'center', paddingVertical: 8, borderRadius: 8, borderWidth: 1, borderColor: '#f59e0b', backgroundColor: '#fffbeb' }}
+                        >
+                          <Text style={{ fontSize: 13, marginRight: 4 }}>📄</Text>
+                          <Text style={{ fontSize: 11, fontWeight: '600', color: '#f59e0b' }}>Devis</Text>
+                        </TouchableOpacity>
+                        <TouchableOpacity
+                          onPress={() => navigation.navigate('CreateInvoice', { interventionId: intervention.id, intervention })}
+                          style={{ flex: 1, minWidth: '40%', flexDirection: 'row', alignItems: 'center', justifyContent: 'center', paddingVertical: 8, borderRadius: 8, borderWidth: 1, borderColor: '#8b5cf6', backgroundColor: '#f5f3ff' }}
+                        >
+                          <Text style={{ fontSize: 13, marginRight: 4 }}>🧾</Text>
+                          <Text style={{ fontSize: 11, fontWeight: '600', color: '#8b5cf6' }}>Facture</Text>
+                        </TouchableOpacity>
+                      </View>
+                      <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginTop: 6 }}>
+                        <TouchableOpacity
+                          onPress={() => navigation.navigate('Messaging', { interventionId: intervention.id, interventionRef: intervention.reference })}
+                          style={{ flex: 1, minWidth: '40%', flexDirection: 'row', alignItems: 'center', justifyContent: 'center', paddingVertical: 8, borderRadius: 8, borderWidth: 1, borderColor: '#0284c7', backgroundColor: '#f0f9ff' }}
+                        >
+                          <Text style={{ fontSize: 13, marginRight: 4 }}>💬</Text>
+                          <Text style={{ fontSize: 11, fontWeight: '600', color: '#0284c7' }}>Message</Text>
+                        </TouchableOpacity>
+                        <TouchableOpacity
+                          onPress={() => navigation.navigate('MyDocuments', { interventionId: intervention.id })}
+                          style={{ flex: 1, minWidth: '40%', flexDirection: 'row', alignItems: 'center', justifyContent: 'center', paddingVertical: 8, borderRadius: 8, borderWidth: 1, borderColor: '#0284c7', backgroundColor: '#f0f9ff' }}
+                        >
+                          <Text style={{ fontSize: 13, marginRight: 4 }}>📋</Text>
+                          <Text style={{ fontSize: 11, fontWeight: '600', color: '#0284c7' }}>Voir docs</Text>
+                        </TouchableOpacity>
+                      </View>
+
+                      {/* Bouton de suivi / tracking */}
                       <TouchableOpacity 
-                        style={styles.continueButton}
-                        onPress={() => navigation.navigate('InterventionDetail', { interventionId: intervention.id })}
+                        style={[styles.continueButton, ['on_site', 'in_progress'].includes(intervention.status) && { backgroundColor: '#059669' }]}
+                        onPress={async () => {
+                          if (['on_site', 'in_progress'].includes(intervention.status)) {
+                            handleOpenCompleteModal(intervention.id);
+                          } else if (intervention.status === 'en_route') {
+                            try {
+                              await api.updateInterventionStatus(intervention.id, 'on_site');
+                              await loadData();
+                            } catch (e: any) {
+                              Alert.alert('Erreur', e.message || 'Impossible de mettre à jour le statut');
+                            }
+                          } else if (intervention.status === 'accepted') {
+                            try {
+                              await api.updateInterventionStatus(intervention.id, 'en_route');
+                              await loadData();
+                            } catch (e: any) {
+                              Alert.alert('Erreur', e.message || 'Impossible de mettre à jour le statut');
+                            }
+                          }
+                        }}
                       >
                         <Text style={styles.continueButtonText}>
                           {intervention.status === 'accepted' ? '🚗 Démarrer le trajet' : 
@@ -682,7 +1027,7 @@ export default function TeamLeaderHomeScreen({ navigation }: any) {
                            '✓ Terminer l\'intervention'}
                         </Text>
                       </TouchableOpacity>
-                    </TouchableOpacity>
+                    </View>
                   );
                 })}
               </View>
@@ -713,59 +1058,165 @@ export default function TeamLeaderHomeScreen({ navigation }: any) {
                         </Text>
                       )}
                     </View>
-                    <TouchableOpacity
-                      style={styles.acceptButton}
-                      onPress={() => handleAcceptIntervention(intervention.id)}
-                    >
-                      <Text style={styles.acceptButtonText}>✓ Accepter (100% commission)</Text>
-                    </TouchableOpacity>
+                    <View style={{ flexDirection: 'row', gap: 8 }}>
+                      <TouchableOpacity
+                        style={[styles.acceptButton, { flex: 1 }]}
+                        onPress={() => handleAcceptIntervention(intervention.id)}
+                      >
+                        <Text style={styles.acceptButtonText}>✓ Accepter</Text>
+                      </TouchableOpacity>
+                      {validatedTechnicians.length > 0 && (
+                        <TouchableOpacity
+                          style={[styles.acceptButton, { flex: 1, backgroundColor: '#2563eb' }]}
+                          onPress={() => handleOpenAssignModal(intervention.id)}
+                        >
+                          <Text style={styles.acceptButtonText}>📤 Envoyer à un tech</Text>
+                        </TouchableOpacity>
+                      )}
+                    </View>
                   </View>
                 ))}
               </View>
             )}
 
             {/* Interventions récentes */}
-            {interventions.length > 0 && (
+            {interventions.filter(i => !['completed', 'cancelled', 'paid', 'invoiced'].includes(i.status)).length > 0 && (
               <View style={styles.section}>
-                <Text style={styles.sectionTitle}>📋 Interventions récentes</Text>
+                <Text style={styles.sectionTitle}>📋 Interventions en cours</Text>
                 {interventions
+                  .filter(i => !['completed', 'cancelled', 'paid', 'invoiced'].includes(i.status))
                   .filter(i => validatedTechnicians.some(t => t.id === i.technicianId))
                   .slice(0, 5)
                   .map((intervention) => {
                     const tech = validatedTechnicians.find(t => t.id === intervention.technicianId);
                     return (
-                      <TouchableOpacity
-                        key={intervention.id}
-                        style={styles.interventionCard}
-                        onPress={() => navigation.navigate('InterventionDetail', { interventionId: intervention.id })}
-                      >
-                        <View style={styles.interventionHeader}>
-                          <View>
-                            <Text style={styles.interventionReference}>{intervention.reference}</Text>
-                            <Text style={styles.interventionType}>
-                              {TYPE_LABELS[intervention.type] || intervention.type}
-                            </Text>
-                            {tech && <Text style={styles.interventionTech}>Par {tech.name}</Text>}
+                      <View key={intervention.id} style={styles.interventionCard}>
+                        <View>
+                          <View style={styles.interventionHeader}>
+                            <View>
+                              <Text style={styles.interventionReference}>{intervention.reference}</Text>
+                              <Text style={styles.interventionType}>
+                                {TYPE_LABELS[intervention.type] || intervention.type}
+                              </Text>
+                              {tech && <Text style={styles.interventionTech}>Par {tech.name}</Text>}
+                            </View>
+                            <View style={[
+                              styles.statusBadge,
+                              { backgroundColor: STATUS_COLORS[intervention.status] || '#6b7280' }
+                            ]}>
+                              <Text style={styles.statusBadgeText}>
+                                {STATUS_LABELS[intervention.status] || intervention.status}
+                              </Text>
+                            </View>
                           </View>
-                          <View style={[
-                            styles.statusBadge,
-                            { backgroundColor: STATUS_COLORS[intervention.status] || '#6b7280' }
-                          ]}>
-                            <Text style={styles.statusBadgeText}>
-                              {STATUS_LABELS[intervention.status] || intervention.status}
-                            </Text>
-                          </View>
+                          {!['pending', 'notified'].includes(intervention.status) && (intervention.clientName || intervention.client?.name) && (
+                            <Text style={styles.interventionClient}>👤 {intervention.clientName || intervention.client?.name}</Text>
+                          )}
+                          {(intervention.address?.street || intervention.address?.city) && (
+                            <Text style={styles.interventionAddress}>📍 {[intervention.address?.street, [intervention.address?.postalCode, intervention.address?.city].filter(Boolean).join(' ')].filter(Boolean).join(', ')}</Text>
+                          )}
+                          {intervention.amountTTC && (
+                            <Text style={styles.interventionAmount}>{formatCurrency(intervention.amountTTC)}</Text>
+                          )}
                         </View>
-                        {!['pending', 'notified'].includes(intervention.status) && (intervention.clientName || intervention.client?.name) && (
-                          <Text style={styles.interventionClient}>👤 {intervention.clientName || intervention.client?.name}</Text>
+                        {/* Actions rapides */}
+                        <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginTop: 10 }}>
+                          {validatedTechnicians.length > 0 && (
+                            <TouchableOpacity
+                              onPress={() => handleOpenAssignModal(intervention.id)}
+                              style={{ flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 4, paddingVertical: 8, borderRadius: 8, backgroundColor: '#f3f0ff', borderWidth: 1, borderColor: '#ddd6fe' }}
+                            >
+                              <Text style={{ fontSize: 14 }}>📤</Text>
+                              <Text style={{ fontSize: 11, fontWeight: '600', color: '#2563eb' }}>Transférer</Text>
+                            </TouchableOpacity>
+                          )}
+                          {(intervention.clientPhone || intervention.client?.phone) ? (
+                            <TouchableOpacity
+                              onPress={() => Linking.openURL(`tel:${intervention.clientPhone || intervention.client?.phone}`)}
+                              style={{ flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 4, paddingVertical: 8, borderRadius: 8, backgroundColor: '#f0fdf4', borderWidth: 1, borderColor: '#bbf7d0' }}
+                            >
+                              <Text style={{ fontSize: 14 }}>📞</Text>
+                              <Text style={{ fontSize: 11, fontWeight: '600', color: '#059669' }}>Appeler</Text>
+                            </TouchableOpacity>
+                          ) : null}
+                          {intervention.address?.street ? (
+                            <TouchableOpacity
+                              onPress={() => openNavigationChoice(intervention.address!, intervention.id)}
+                              style={{ flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 4, paddingVertical: 8, borderRadius: 8, backgroundColor: '#eff6ff', borderWidth: 1, borderColor: '#bfdbfe' }}
+                            >
+                              <Text style={{ fontSize: 14 }}>🗺️</Text>
+                              <Text style={{ fontSize: 11, fontWeight: '600', color: '#2563eb' }}>Naviguer</Text>
+                            </TouchableOpacity>
+                          ) : null}
+                          <TouchableOpacity
+                            onPress={() => handleOpenCancelModal(intervention.id)}
+                            style={{ flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 4, paddingVertical: 8, borderRadius: 8, backgroundColor: '#fef2f2', borderWidth: 1, borderColor: '#fecaca' }}
+                          >
+                            <Text style={{ fontSize: 14 }}>❌</Text>
+                            <Text style={{ fontSize: 11, fontWeight: '600', color: '#dc2626' }}>Annuler</Text>
+                          </TouchableOpacity>
+                        </View>
+                        <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginTop: 6 }}>
+                          <TouchableOpacity
+                            onPress={() => navigation.navigate('CreateQuote', { interventionId: intervention.id, intervention })}
+                            style={{ flex: 1, minWidth: '40%', flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 4, paddingVertical: 8, borderRadius: 8, backgroundColor: '#fefce8', borderWidth: 1, borderColor: '#fde68a' }}
+                          >
+                            <Text style={{ fontSize: 14 }}>📄</Text>
+                            <Text style={{ fontSize: 11, fontWeight: '600', color: '#a16207' }}>Devis</Text>
+                          </TouchableOpacity>
+                          <TouchableOpacity
+                            onPress={() => navigation.navigate('CreateInvoice', { interventionId: intervention.id, intervention })}
+                            style={{ flex: 1, minWidth: '40%', flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 4, paddingVertical: 8, borderRadius: 8, backgroundColor: '#faf5ff', borderWidth: 1, borderColor: '#e9d5ff' }}
+                          >
+                            <Text style={{ fontSize: 14 }}>🧾</Text>
+                            <Text style={{ fontSize: 11, fontWeight: '600', color: '#2563eb' }}>Facture</Text>
+                          </TouchableOpacity>
+                          <TouchableOpacity
+                            onPress={() => navigation.navigate('Messaging', { interventionId: intervention.id, interventionRef: intervention.reference })}
+                            style={{ flex: 1, minWidth: '40%', flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 4, paddingVertical: 8, borderRadius: 8, backgroundColor: '#ecfdf5', borderWidth: 1, borderColor: '#a7f3d0' }}
+                          >
+                            <Text style={{ fontSize: 14 }}>💬</Text>
+                            <Text style={{ fontSize: 11, fontWeight: '600', color: '#059669' }}>Message</Text>
+                          </TouchableOpacity>
+                          <TouchableOpacity
+                            onPress={() => navigation.navigate('MyDocuments', { interventionId: intervention.id })}
+                            style={{ flex: 1, minWidth: '40%', flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 4, paddingVertical: 8, borderRadius: 8, backgroundColor: '#f0f9ff', borderWidth: 1, borderColor: '#bae6fd' }}
+                          >
+                            <Text style={{ fontSize: 14 }}>📋</Text>
+                            <Text style={{ fontSize: 11, fontWeight: '600', color: '#0284c7' }}>Voir docs</Text>
+                          </TouchableOpacity>
+                        </View>
+                        {['accepted', 'en_route', 'on_site', 'in_progress'].includes(intervention.status) && (
+                          <TouchableOpacity
+                            onPress={async () => {
+                              if (['on_site', 'in_progress'].includes(intervention.status)) {
+                                handleOpenCompleteModal(intervention.id);
+                              } else if (intervention.status === 'en_route') {
+                                try {
+                                  await api.updateInterventionStatus(intervention.id, 'on_site');
+                                  await loadData();
+                                } catch (e: any) {
+                                  Alert.alert('Erreur', e.message || 'Impossible de mettre à jour le statut');
+                                }
+                              } else if (intervention.status === 'accepted') {
+                                try {
+                                  await api.updateInterventionStatus(intervention.id, 'en_route');
+                                  await loadData();
+                                } catch (e: any) {
+                                  Alert.alert('Erreur', e.message || 'Impossible de mettre à jour le statut');
+                                }
+                              }
+                            }}
+                            style={{ marginTop: 6, paddingVertical: 12, borderRadius: 10, backgroundColor: ['on_site', 'in_progress'].includes(intervention.status) ? '#059669' : '#2563eb', alignItems: 'center' }}
+                          >
+                            <Text style={{ fontSize: 14, fontWeight: '700', color: '#fff' }}>
+                              {intervention.status === 'accepted' ? '🚗 Démarrer le trajet' :
+                               intervention.status === 'en_route' ? '📍 Je suis arrivé' :
+                               '✓ Terminer l\'intervention'}
+                            </Text>
+                          </TouchableOpacity>
                         )}
-                        {intervention.address?.city && (
-                          <Text style={styles.interventionAddress}>📍 {intervention.address.city}</Text>
-                        )}
-                        {intervention.amountTTC && (
-                          <Text style={styles.interventionAmount}>{formatCurrency(intervention.amountTTC)}</Text>
-                        )}
-                      </TouchableOpacity>
+                      </View>
                     );
                   })}
               </View>
@@ -788,53 +1239,109 @@ export default function TeamLeaderHomeScreen({ navigation }: any) {
                 
                 <View style={styles.paymentSummaryRow}>
                   <Text style={styles.paymentLabel}>Ma commission ({stats.commissionFromAdmin != null ? `${stats.commissionFromAdmin}%` : '—'})</Text>
-                  <Text style={[styles.paymentValue, styles.greenText]}>{formatCurrency(stats.netProfit || 0)}</Text>
+                  <Text style={[styles.paymentValue, styles.greenText]}>{formatCurrency((stats.totalRevenue || 0) * ((stats.commissionFromAdmin ?? 0) / 100))}</Text>
                 </View>
-                
+
+                <View style={[styles.paymentSummaryRow, styles.paymentSummaryTotal]}>
+                  <Text style={styles.paymentTotalLabel}>À recevoir de l'admin</Text>
+                  <Text style={[styles.paymentTotalValue, styles.greenText]}>{formatCurrency(stats.totalToReceive || 0)}</Text>
+                </View>
+
                 <View style={[styles.paymentSummaryRow, styles.paymentSummaryTotal]}>
                   <Text style={styles.paymentTotalLabel}>À verser aux techniciens</Text>
                   <Text style={[styles.paymentTotalValue, styles.orangeText]}>{formatCurrency(stats.totalToPayTechnicians || 0)}</Text>
                 </View>
+
+                <View style={[styles.paymentSummaryRow, styles.paymentSummaryTotal]}>
+                  <Text style={styles.paymentTotalLabel}>Profit net</Text>
+                  <Text style={[styles.paymentTotalValue, { color: COLORS.primary, fontWeight: '800' }]}>{formatCurrency(stats.netProfit || 0)}</Text>
+                </View>
               </View>
               
               {/* Détail par technicien */}
-              {validatedTechnicians.length > 0 && (
+              {(stats.technicianStats || []).length > 0 && (
                 <View style={styles.technicianPaymentsCard}>
                   <Text style={styles.technicianPaymentsTitle}>Détail par technicien</Text>
-                  
-                  {validatedTechnicians.map((tech) => {
-                    // Calculer les interventions et gains de ce technicien
-                    const techInterventions = interventions.filter(i => 
-                      i.technicianId === tech.id && 
-                      (i.status === 'completed' || i.status === 'invoiced')
-                    );
-                    const techRevenue = techInterventions.reduce((sum, i) => {
-                      const amount = parseFloat(String(i.amountTTC)) || parseFloat(String(i.amountRealized)) || 0;
-                      return sum + amount;
-                    }, 0);
-                    const techCommission = parseFloat(String(tech.commissionPercentage)) || 30;
-                    const techToPay = techRevenue * (techCommission / 100);
-                    
-                    return (
-                      <View key={tech.id} style={styles.technicianPaymentRow}>
-                        <View style={styles.technicianPaymentInfo}>
-                          <Text style={styles.technicianPaymentName}>{tech.name}</Text>
-                          <Text style={styles.technicianPaymentDetails}>
-                            {techInterventions.length} intervention(s) • {techCommission}% commission
-                          </Text>
-                        </View>
-                        <View style={styles.technicianPaymentAmount}>
-                          <Text style={styles.technicianPaymentValue}>{formatCurrency(techToPay)}</Text>
-                          <Text style={styles.technicianPaymentStatus}>
-                            {techToPay > 0 ? '⏳ À verser' : '✓ À jour'}
-                          </Text>
-                        </View>
+
+                  {(stats.technicianStats || []).map((techStat) => (
+                    <View key={techStat.id} style={styles.technicianPaymentRow}>
+                      <View style={styles.technicianPaymentInfo}>
+                        <Text style={styles.technicianPaymentName}>{techStat.name}{techStat.isTL ? ' (moi)' : ''}</Text>
+                        <Text style={styles.technicianPaymentDetails}>
+                          {techStat.interventionsCount} intervention(s) • {techStat.commissionPercentage}% commission
+                        </Text>
                       </View>
-                    );
-                  })}
+                      <View style={styles.technicianPaymentAmount}>
+                        <Text style={[styles.technicianPaymentValue, techStat.isTL ? styles.greenText : null]}>{formatCurrency(techStat.toPay)}</Text>
+                        <Text style={styles.technicianPaymentStatus}>
+                          {techStat.toPay > 0 ? (techStat.isTL ? '📥 À recevoir' : '⏳ À verser') : '✓ À jour'}
+                        </Text>
+                      </View>
+                    </View>
+                  ))}
                 </View>
               )}
             </View>
+          </View>
+          <View style={{ height: 100 }} />
+        </ScrollView>
+      )}
+
+      {/* ===== VUE MES INTERVENTIONS ===== */}
+      {mainView === 'interventions' && (
+        <ScrollView
+          style={styles.scrollView}
+          refreshControl={
+            <RefreshControl refreshing={refreshing} onRefresh={onRefresh} colors={[COLORS.primary]} />
+          }
+        >
+          <View style={styles.content}>
+            <Text style={styles.sectionTitle}>🔧 Toutes les interventions</Text>
+            {interventions.length === 0 ? (
+              <View style={styles.emptyState}>
+                <Text style={styles.emptyIcon}>📋</Text>
+                <Text style={styles.emptyTitle}>Aucune intervention</Text>
+                <Text style={styles.emptySubtitle}>Les interventions apparaîtront ici</Text>
+              </View>
+            ) : (
+              interventions.filter(i => i.status !== 'cancelled').map((intervention) => {
+                const tech = validatedTechnicians.find(t => t.id === intervention.technicianId);
+                return (
+                  <TouchableOpacity
+                    key={intervention.id}
+                    style={styles.interventionCard}
+                    onPress={() => (navigation as any).navigate('InterventionDetail', { interventionId: intervention.id })}
+                  >
+                    <View style={styles.interventionHeader}>
+                      <View style={{ flex: 1 }}>
+                        <Text style={styles.interventionReference}>{intervention.reference}</Text>
+                        <Text style={styles.interventionType}>
+                          {TYPE_LABELS[intervention.type] || intervention.type}
+                        </Text>
+                        {tech && <Text style={styles.interventionTech}>Par {tech.name}</Text>}
+                      </View>
+                      <View style={[
+                        styles.statusBadge,
+                        { backgroundColor: STATUS_COLORS[intervention.status] || '#6b7280' }
+                      ]}>
+                        <Text style={styles.statusBadgeText}>
+                          {STATUS_LABELS[intervention.status] || intervention.status}
+                        </Text>
+                      </View>
+                    </View>
+                    {!['pending', 'notified'].includes(intervention.status) && (intervention.clientName || intervention.client?.name) && (
+                      <Text style={styles.interventionClient}>👤 {intervention.clientName || intervention.client?.name}</Text>
+                    )}
+                    {(intervention.address?.street || intervention.address?.city) && (
+                      <Text style={styles.interventionAddress}>📍 {[intervention.address?.street, [intervention.address?.postalCode, intervention.address?.city].filter(Boolean).join(' ')].filter(Boolean).join(', ')}</Text>
+                    )}
+                    {intervention.amountTTC != null && Number(intervention.amountTTC) > 0 && (
+                      <Text style={styles.interventionAmount}>{formatCurrency(intervention.amountTTC)}</Text>
+                    )}
+                  </TouchableOpacity>
+                );
+              })
+            )}
           </View>
           <View style={{ height: 100 }} />
         </ScrollView>
@@ -1033,6 +1540,43 @@ export default function TeamLeaderHomeScreen({ navigation }: any) {
                   )}
                 </View>
               </View>
+              {editingName ? (
+                <View style={{ marginTop: 12 }}>
+                  <TextInput
+                    style={{ borderWidth: 1, borderColor: '#d1d5db', borderRadius: 10, paddingHorizontal: 14, paddingVertical: 10, fontSize: 16, color: '#111827', backgroundColor: '#f9fafb' }}
+                    value={newName}
+                    onChangeText={setNewName}
+                    placeholder="Votre nom"
+                    autoFocus
+                  />
+                  <View style={{ flexDirection: 'row', gap: 10, marginTop: 12 }}>
+                    <TouchableOpacity
+                      onPress={() => setEditingName(false)}
+                      style={{ flex: 1, paddingVertical: 10, borderRadius: 10, backgroundColor: '#f3f4f6', alignItems: 'center' }}
+                    >
+                      <Text style={{ fontSize: 14, fontWeight: '600', color: '#6b7280' }}>Annuler</Text>
+                    </TouchableOpacity>
+                    <TouchableOpacity
+                      onPress={handleSaveName}
+                      disabled={savingName}
+                      style={{ flex: 1, paddingVertical: 10, borderRadius: 10, backgroundColor: COLORS.primary, alignItems: 'center' }}
+                    >
+                      {savingName ? (
+                        <ActivityIndicator size="small" color="#fff" />
+                      ) : (
+                        <Text style={{ fontSize: 14, fontWeight: '600', color: '#fff' }}>Enregistrer</Text>
+                      )}
+                    </TouchableOpacity>
+                  </View>
+                </View>
+              ) : (
+                <TouchableOpacity
+                  onPress={() => { setNewName(teamLeader?.name || ''); setEditingName(true); }}
+                  style={{ marginTop: 12, alignSelf: 'flex-start', paddingHorizontal: 14, paddingVertical: 8, borderRadius: 8, backgroundColor: '#eff6ff', borderWidth: 1, borderColor: '#bfdbfe' }}
+                >
+                  <Text style={{ fontSize: 13, fontWeight: '600', color: COLORS.primary }}>✏️ Modifier le nom</Text>
+                </TouchableOpacity>
+              )}
             </View>
 
             {/* Commission reçue */}
@@ -1314,30 +1858,21 @@ export default function TeamLeaderHomeScreen({ navigation }: any) {
           onPress={() => setMainView('stats')}
         >
           <Text style={[styles.bottomNavIcon, mainView === 'stats' && styles.activeNavIcon]}>
-            📊
+            🏠
           </Text>
           <Text style={[styles.bottomNavText, mainView === 'stats' && styles.activeNavText]}>
-            Stats
+            Accueil
           </Text>
         </TouchableOpacity>
         <TouchableOpacity
           style={styles.bottomNavItem}
-          onPress={() => setMainView('technicians')}
+          onPress={() => setMainView('interventions')}
         >
-          <View style={styles.bottomNavIconContainer}>
-            <Text style={[styles.bottomNavIcon, mainView === 'technicians' && styles.activeNavIcon]}>
-              👥
-            </Text>
-            {validatedTechnicians.length > 0 && (
-              <View style={styles.badge}>
-                <Text style={styles.badgeText}>
-                  {validatedTechnicians.length > 99 ? '99+' : validatedTechnicians.length}
-                </Text>
-              </View>
-            )}
-          </View>
-          <Text style={[styles.bottomNavText, mainView === 'technicians' && styles.activeNavText]}>
-            Techniciens
+          <Text style={[styles.bottomNavIcon, mainView === 'interventions' && styles.activeNavIcon]}>
+            🔧
+          </Text>
+          <Text style={[styles.bottomNavText, mainView === 'interventions' && styles.activeNavText]}>
+            Mes Inters
           </Text>
         </TouchableOpacity>
         <TouchableOpacity
@@ -1365,10 +1900,10 @@ export default function TeamLeaderHomeScreen({ navigation }: any) {
           onPress={() => setMainView('settings')}
         >
           <Text style={[styles.bottomNavIcon, mainView === 'settings' && styles.activeNavIcon]}>
-            ⚙️
+            👤
           </Text>
           <Text style={[styles.bottomNavText, mainView === 'settings' && styles.activeNavText]}>
-            Paramètres
+            Profil
           </Text>
         </TouchableOpacity>
       </View>
@@ -1694,6 +2229,13 @@ export default function TeamLeaderHomeScreen({ navigation }: any) {
                 </View>
                 <View style={styles.profitDivider} />
                 <View style={styles.profitRow}>
+                  <Text style={styles.profitLabel}>À recevoir de l'admin</Text>
+                  <Text style={[styles.profitValue, styles.profitGreen]}>
+                    {formatCurrency(stats.totalToReceive || 0)}
+                  </Text>
+                </View>
+                <View style={styles.profitDivider} />
+                <View style={styles.profitRow}>
                   <Text style={styles.profitLabel}>À verser aux techniciens</Text>
                   <Text style={[styles.profitValue, styles.profitOrange]}>
                     - {formatCurrency(stats.totalToPayTechnicians || 0)}
@@ -1736,6 +2278,172 @@ export default function TeamLeaderHomeScreen({ navigation }: any) {
           </View>
         </View>
       </Modal>
+
+      {/* Modale d'assignation intervention → technicien */}
+      <Modal visible={showAssignModal} transparent animationType="slide" onRequestClose={() => setShowAssignModal(false)}>
+        <View style={{ flex: 1, backgroundColor: 'rgba(0,0,0,0.5)', justifyContent: 'flex-end' }}>
+          <View style={{ backgroundColor: '#fff', borderTopLeftRadius: 20, borderTopRightRadius: 20, maxHeight: '60%', paddingBottom: 30 }}>
+            <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', padding: 20, borderBottomWidth: 1, borderBottomColor: '#e5e7eb' }}>
+              <Text style={{ fontSize: 18, fontWeight: '700', color: '#111827' }}>📤 Envoyer à un technicien</Text>
+              <TouchableOpacity onPress={() => setShowAssignModal(false)}>
+                <Text style={{ fontSize: 22, color: '#6b7280' }}>✕</Text>
+              </TouchableOpacity>
+            </View>
+            <ScrollView style={{ padding: 16 }}>
+              {validatedTechnicians.length === 0 ? (
+                <Text style={{ textAlign: 'center', color: '#9ca3af', padding: 20 }}>Aucun technicien dans votre équipe</Text>
+              ) : (
+                validatedTechnicians.map(tech => (
+                  <TouchableOpacity
+                    key={tech.id}
+                    onPress={() => handleAssignToTech(tech.id)}
+                    disabled={assigning}
+                    style={{ flexDirection: 'row', alignItems: 'center', padding: 16, borderRadius: 12, backgroundColor: '#f9fafb', marginBottom: 8, borderWidth: 1, borderColor: '#e5e7eb' }}
+                  >
+                    <View style={{ width: 44, height: 44, borderRadius: 22, backgroundColor: '#2563eb', justifyContent: 'center', alignItems: 'center', marginRight: 12 }}>
+                      <Text style={{ color: '#fff', fontWeight: '700', fontSize: 16 }}>{(tech.name || '?')[0].toUpperCase()}</Text>
+                    </View>
+                    <View style={{ flex: 1 }}>
+                      <Text style={{ fontSize: 15, fontWeight: '600', color: '#111827' }}>{tech.name}</Text>
+                      {tech.phone && <Text style={{ fontSize: 12, color: '#6b7280', marginTop: 2 }}>📞 {tech.phone}</Text>}
+                      {tech.commissionPercentage !== undefined && (
+                        <Text style={{ fontSize: 11, color: '#9ca3af', marginTop: 1 }}>Commission : {tech.commissionPercentage}%</Text>
+                      )}
+                    </View>
+                    {assigning ? (
+                      <ActivityIndicator size="small" color="#2563eb" />
+                    ) : (
+                      <Text style={{ fontSize: 20 }}>➤</Text>
+                    )}
+                  </TouchableOpacity>
+                ))
+              )}
+            </ScrollView>
+          </View>
+        </View>
+      </Modal>
+
+      {/* Modale de complétion intervention */}
+      <Modal visible={showCompleteModal} transparent animationType="slide" onRequestClose={() => setShowCompleteModal(false)}>
+        <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} style={{ flex: 1 }}>
+          <View style={{ flex: 1, backgroundColor: 'rgba(0,0,0,0.5)', justifyContent: 'flex-end' }}>
+            <View style={{ backgroundColor: '#fff', borderTopLeftRadius: 20, borderTopRightRadius: 20, maxHeight: '90%', paddingBottom: 30 }}>
+              <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', padding: 20, borderBottomWidth: 1, borderBottomColor: '#e5e7eb' }}>
+                <Text style={{ fontSize: 18, fontWeight: '700', color: '#111827' }}>📋 Rapport de fin d'intervention</Text>
+                <TouchableOpacity onPress={() => setShowCompleteModal(false)}>
+                  <Text style={{ fontSize: 22, color: '#6b7280' }}>✕</Text>
+                </TouchableOpacity>
+              </View>
+              <ScrollView style={{ padding: 16 }} keyboardShouldPersistTaps="handled">
+                <Text style={{ fontSize: 14, fontWeight: '600', color: '#374151', marginBottom: 6 }}>💰 Montants</Text>
+                <View style={{ flexDirection: 'row', gap: 10 }}>
+                  <View style={{ flex: 1 }}>
+                    <Text style={{ fontSize: 12, color: '#6b7280', marginBottom: 4 }}>Montant final TTC (€) *</Text>
+                    <TextInput value={cFinalAmount} onChangeText={setCFinalAmount} keyboardType="decimal-pad" placeholder="0.00" style={{ borderWidth: 1, borderColor: '#d1d5db', borderRadius: 10, padding: 12, fontSize: 15, backgroundColor: '#f9fafb' }} />
+                  </View>
+                  <View style={{ flex: 1 }}>
+                    <Text style={{ fontSize: 12, color: '#6b7280', marginBottom: 4 }}>Coût matériel (€)</Text>
+                    <TextInput value={cMaterialCost} onChangeText={setCMaterialCost} keyboardType="decimal-pad" placeholder="0.00" style={{ borderWidth: 1, borderColor: '#d1d5db', borderRadius: 10, padding: 12, fontSize: 15, backgroundColor: '#f9fafb' }} />
+                  </View>
+                </View>
+                <View style={{ flexDirection: 'row', gap: 10, marginTop: 8 }}>
+                  <View style={{ flex: 1 }}>
+                    <Text style={{ fontSize: 12, color: '#6b7280', marginBottom: 4 }}>Temps passé (heures)</Text>
+                    <TextInput value={cTimeSpent} onChangeText={setCTimeSpent} keyboardType="decimal-pad" placeholder="Ex: 1.5" style={{ borderWidth: 1, borderColor: '#d1d5db', borderRadius: 10, padding: 12, fontSize: 15, backgroundColor: '#f9fafb' }} />
+                  </View>
+                  <View style={{ flex: 1 }} />
+                </View>
+
+                <Text style={{ fontSize: 14, fontWeight: '600', color: '#374151', marginTop: 16, marginBottom: 6 }}>📝 Détails</Text>
+                <Text style={{ fontSize: 12, color: '#6b7280', marginBottom: 4 }}>Description des travaux</Text>
+                <TextInput value={cDescription} onChangeText={setCDescription} multiline numberOfLines={3} placeholder="Décrivez les travaux effectués..." style={{ borderWidth: 1, borderColor: '#d1d5db', borderRadius: 10, padding: 12, fontSize: 15, backgroundColor: '#f9fafb', minHeight: 70, textAlignVertical: 'top' }} />
+                <Text style={{ fontSize: 12, color: '#6b7280', marginBottom: 4, marginTop: 8 }}>Notes / Observations</Text>
+                <TextInput value={cNotes} onChangeText={setCNotes} multiline numberOfLines={3} placeholder="Remarques, problèmes rencontrés..." style={{ borderWidth: 1, borderColor: '#d1d5db', borderRadius: 10, padding: 12, fontSize: 15, backgroundColor: '#f9fafb', minHeight: 70, textAlignVertical: 'top' }} />
+
+                <Text style={{ fontSize: 14, fontWeight: '600', color: '#374151', marginTop: 16, marginBottom: 6 }}>📸 Photos</Text>
+                {cPhotos.length > 0 && (
+                  <ScrollView horizontal style={{ marginBottom: 8 }}>
+                    {cPhotos.map((uri, i) => (
+                      <View key={i} style={{ marginRight: 8, position: 'relative' }}>
+                        <Image source={{ uri }} style={{ width: 70, height: 70, borderRadius: 8 }} />
+                        <TouchableOpacity onPress={() => setCPhotos(p => p.filter((_, idx) => idx !== i))} style={{ position: 'absolute', top: -6, right: -6, backgroundColor: '#ef4444', borderRadius: 10, width: 20, height: 20, alignItems: 'center', justifyContent: 'center' }}>
+                          <Text style={{ color: '#fff', fontSize: 12, fontWeight: '700' }}>✕</Text>
+                        </TouchableOpacity>
+                      </View>
+                    ))}
+                  </ScrollView>
+                )}
+                <View style={{ flexDirection: 'row', gap: 8 }}>
+                  <TouchableOpacity onPress={cTakePhoto} style={{ flex: 1, paddingVertical: 10, borderRadius: 10, backgroundColor: '#2563eb', alignItems: 'center' }}>
+                    <Text style={{ color: '#fff', fontWeight: '600', fontSize: 13 }}>📷 Photo</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity onPress={cPickPhoto} style={{ flex: 1, paddingVertical: 10, borderRadius: 10, backgroundColor: '#fff', borderWidth: 1, borderColor: '#2563eb', alignItems: 'center' }}>
+                    <Text style={{ color: '#2563eb', fontWeight: '600', fontSize: 13 }}>🖼️ Galerie</Text>
+                  </TouchableOpacity>
+                </View>
+
+                <View style={{ flexDirection: 'row', gap: 10, marginTop: 20 }}>
+                  <TouchableOpacity onPress={() => setShowCompleteModal(false)} style={{ flex: 1, paddingVertical: 14, borderRadius: 12, backgroundColor: '#f3f4f6', alignItems: 'center' }}>
+                    <Text style={{ fontSize: 15, fontWeight: '600', color: '#6b7280' }}>Annuler</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity onPress={handleCompleteIntervention} disabled={completing} style={{ flex: 1, paddingVertical: 14, borderRadius: 12, backgroundColor: '#059669', alignItems: 'center' }}>
+                    {completing ? <ActivityIndicator size="small" color="#fff" /> : <Text style={{ fontSize: 15, fontWeight: '700', color: '#fff' }}>✓ Terminer</Text>}
+                  </TouchableOpacity>
+                </View>
+                <View style={{ height: 20 }} />
+              </ScrollView>
+            </View>
+          </View>
+        </KeyboardAvoidingView>
+      </Modal>
+
+      {/* Modale d'annulation intervention */}
+      <Modal visible={showCancelModal} transparent animationType="slide" onRequestClose={() => setShowCancelModal(false)}>
+        <View style={{ flex: 1, backgroundColor: 'rgba(0,0,0,0.5)', justifyContent: 'center', paddingHorizontal: 24 }}>
+          <View style={{ backgroundColor: '#fff', borderRadius: 20, paddingBottom: 20 }}>
+            <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', padding: 20, borderBottomWidth: 1, borderBottomColor: '#e5e7eb' }}>
+              <Text style={{ fontSize: 18, fontWeight: '700', color: '#111827' }}>❌ Annuler l'intervention</Text>
+              <TouchableOpacity onPress={() => setShowCancelModal(false)}>
+                <Text style={{ fontSize: 22, color: '#6b7280' }}>✕</Text>
+              </TouchableOpacity>
+            </View>
+            <Text style={{ fontSize: 14, color: '#6b7280', paddingHorizontal: 20, paddingTop: 12, paddingBottom: 8 }}>Sélectionnez la raison :</Text>
+            <View style={{ paddingHorizontal: 16 }}>
+              {CANCEL_REASONS.map((reason) => (
+                <TouchableOpacity
+                  key={reason}
+                  onPress={() => setSelectedCancelReason(reason)}
+                  style={{ flexDirection: 'row', alignItems: 'center', padding: 14, borderRadius: 12, backgroundColor: selectedCancelReason === reason ? '#fef2f2' : '#f9fafb', marginBottom: 6, borderWidth: 1.5, borderColor: selectedCancelReason === reason ? '#f87171' : '#e5e7eb' }}
+                >
+                  <View style={{ width: 22, height: 22, borderRadius: 11, borderWidth: 2, borderColor: selectedCancelReason === reason ? '#dc2626' : '#d1d5db', backgroundColor: selectedCancelReason === reason ? '#dc2626' : '#fff', justifyContent: 'center', alignItems: 'center', marginRight: 12 }}>
+                    {selectedCancelReason === reason && <View style={{ width: 8, height: 8, borderRadius: 4, backgroundColor: '#fff' }} />}
+                  </View>
+                  <Text style={{ fontSize: 15, fontWeight: selectedCancelReason === reason ? '600' : '400', color: selectedCancelReason === reason ? '#dc2626' : '#374151' }}>{reason}</Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+            <View style={{ paddingHorizontal: 16, marginTop: 12, flexDirection: 'row', gap: 10 }}>
+              <TouchableOpacity
+                onPress={() => setShowCancelModal(false)}
+                style={{ flex: 1, paddingVertical: 14, borderRadius: 12, backgroundColor: '#f3f4f6', alignItems: 'center' }}
+              >
+                <Text style={{ fontSize: 15, fontWeight: '600', color: '#6b7280' }}>Retour</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                onPress={handleCancelIntervention}
+                disabled={!selectedCancelReason || cancelling}
+                style={{ flex: 1, paddingVertical: 14, borderRadius: 12, backgroundColor: selectedCancelReason ? '#dc2626' : '#fca5a5', alignItems: 'center' }}
+              >
+                {cancelling ? (
+                  <ActivityIndicator size="small" color="#fff" />
+                ) : (
+                  <Text style={{ fontSize: 15, fontWeight: '600', color: '#fff' }}>Confirmer</Text>
+                )}
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
     </SafeAreaView>
   );
 }
@@ -1758,12 +2466,12 @@ const styles = StyleSheet.create({
     flex: 1,
   },
   header: {
-    backgroundColor: '#7c3aed', // purple-600
+    backgroundColor: '#ffffff',
     paddingTop: 10,
-    paddingBottom: 24,
+    paddingBottom: 20,
     paddingHorizontal: 20,
-    borderBottomLeftRadius: 24,
-    borderBottomRightRadius: 24,
+    borderBottomWidth: 1,
+    borderBottomColor: COLORS.border,
   },
   headerTop: {
     flexDirection: 'row',
@@ -1776,28 +2484,26 @@ const styles = StyleSheet.create({
     gap: 12,
   },
   avatar: {
-    width: 48,
-    height: 48,
-    borderRadius: 24,
-    backgroundColor: 'rgba(255,255,255,0.2)',
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    backgroundColor: COLORS.primary,
     alignItems: 'center',
     justifyContent: 'center',
-    borderWidth: 2,
-    borderColor: '#fff',
   },
   avatarText: {
     color: '#fff',
     fontWeight: 'bold',
-    fontSize: 16,
+    fontSize: 15,
   },
   userName: {
     fontSize: 18,
     fontWeight: 'bold',
-    color: '#fff',
+    color: COLORS.text,
   },
   userRole: {
     fontSize: 13,
-    color: 'rgba(255,255,255,0.7)',
+    color: COLORS.textMuted,
   },
   headerActions: {
     flexDirection: 'row',
@@ -1806,11 +2512,13 @@ const styles = StyleSheet.create({
   headerButton: {
     padding: 10,
     borderRadius: 20,
-    backgroundColor: 'rgba(255,255,255,0.2)',
+    backgroundColor: COLORS.background,
+    borderWidth: 1,
+    borderColor: COLORS.border,
   },
   headerButtonIcon: {
     fontSize: 18,
-    color: '#fff',
+    color: COLORS.textMuted,
   },
   content: {
     padding: 16,
@@ -1824,26 +2532,23 @@ const styles = StyleSheet.create({
   statCard: {
     width: (SCREEN_WIDTH - 44) / 2,
     backgroundColor: COLORS.card,
-    borderRadius: 16,
+    borderRadius: 14,
     padding: 16,
     alignItems: 'center',
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.05,
-    shadowRadius: 8,
-    elevation: 2,
+    borderWidth: 1,
+    borderColor: COLORS.border,
   },
   blueCard: {
-    backgroundColor: '#eff6ff',
+    backgroundColor: '#ffffff',
   },
   greenCard: {
-    backgroundColor: '#ecfdf5',
+    backgroundColor: '#ffffff',
   },
   yellowCard: {
     backgroundColor: '#fefce8',
   },
   purpleCard: {
-    backgroundColor: '#f5f3ff',
+    backgroundColor: '#ffffff',
   },
   statIcon: {
     fontSize: 24,
@@ -1896,11 +2601,11 @@ const styles = StyleSheet.create({
   },
   availableCard: {
     backgroundColor: COLORS.card,
-    borderRadius: 16,
+    borderRadius: 14,
     padding: 16,
     marginBottom: 12,
-    borderWidth: 2,
-    borderColor: '#7c3aed',
+    borderWidth: 1,
+    borderColor: COLORS.border,
   },
   availableCardHeader: {
     flexDirection: 'row',
@@ -1913,7 +2618,7 @@ const styles = StyleSheet.create({
   availableReference: {
     fontSize: 16,
     fontWeight: 'bold',
-    color: '#7c3aed',
+    color: COLORS.primary,
   },
   availableType: {
     fontSize: 14,
@@ -1931,7 +2636,7 @@ const styles = StyleSheet.create({
     color: COLORS.success,
   },
   acceptButton: {
-    backgroundColor: '#7c3aed',
+    backgroundColor: '#2563eb',
     paddingVertical: 12,
     borderRadius: 10,
     alignItems: 'center',
@@ -2125,7 +2830,7 @@ const styles = StyleSheet.create({
     fontWeight: '600',
   },
   purpleText: {
-    color: '#7c3aed',
+    color: '#2563eb',
     fontWeight: '600',
   },
   activeInterventions: {
@@ -2329,7 +3034,7 @@ const styles = StyleSheet.create({
     width: 64,
     height: 64,
     borderRadius: 32,
-    backgroundColor: '#7c3aed',
+    backgroundColor: '#2563eb',
     alignItems: 'center',
     justifyContent: 'center',
     marginRight: 16,
@@ -2487,7 +3192,7 @@ const styles = StyleSheet.create({
   },
   spcpInfoText: {
     fontSize: 13,
-    color: '#3b82f6',
+    color: '#2563eb',
     lineHeight: 20,
   },
   departmentsContainer: {
@@ -2561,14 +3266,14 @@ const styles = StyleSheet.create({
     marginTop: 4,
   },
   activeNavText: {
-    color: '#7c3aed',
+    color: '#2563eb',
     fontWeight: '600',
   },
   badge: {
     position: 'absolute',
     top: -4,
     right: -10,
-    backgroundColor: '#7c3aed',
+    backgroundColor: '#2563eb',
     minWidth: 18,
     height: 18,
     borderRadius: 9,
@@ -2902,9 +3607,6 @@ const styles = StyleSheet.create({
     fontSize: 18,
     fontWeight: 'bold',
   },
-  greenText: {
-    color: '#059669',
-  },
   technicianPaymentsCard: {
     backgroundColor: COLORS.card,
     borderRadius: 16,
@@ -2964,25 +3666,6 @@ const styles = StyleSheet.create({
     marginTop: 6,
     fontStyle: 'italic',
   },
-  modalOverlay: {
-    flex: 1,
-    backgroundColor: 'rgba(0,0,0,0.5)',
-    justifyContent: 'flex-end',
-  },
-  modalContent: {
-    backgroundColor: '#fff',
-    borderTopLeftRadius: 24,
-    borderTopRightRadius: 24,
-    maxHeight: '80%',
-  },
-  modalHeader: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    padding: 20,
-    borderBottomWidth: 1,
-    borderBottomColor: COLORS.border,
-  },
   modalTitle: {
     fontSize: 18,
     fontWeight: 'bold',
@@ -2992,9 +3675,6 @@ const styles = StyleSheet.create({
     fontSize: 24,
     color: COLORS.textMuted,
     padding: 4,
-  },
-  modalBody: {
-    padding: 20,
   },
   modalEmptyText: {
     textAlign: 'center',

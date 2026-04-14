@@ -8,8 +8,8 @@ export const GOOGLE_CLIENT_ID = '954969751630-hi31ugd2qu1dvp9eil8ccd3kqnf07tum.a
 
 // Couleurs de l'application (cohérentes avec le web)
 export const COLORS = {
-  primary: '#3b82f6',      // blue-500
-  primaryDark: '#2563eb',  // blue-600
+  primary: '#2563eb',      // blue-600
+  primaryDark: '#1d4ed8',  // blue-700
   secondary: '#64748b',    // slate-500
   success: '#22c55e',      // green-500
   warning: '#f59e0b',      // amber-500

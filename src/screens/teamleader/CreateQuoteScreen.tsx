@@ -31,7 +31,10 @@ interface LineItem {
   unitPrice: string;
 }
 
-const DEPOSIT_PERCENTAGE = 50;
+const PAYMENT_OPTIONS = [
+  { value: 50, label: 'Acompte 50%', key: 'deposit' },
+  { value: 100, label: 'Totalité 100%', key: 'full' },
+];
 
 const TVA_OPTIONS = [
   { value: 0, label: '0%' },
@@ -83,6 +86,8 @@ export default function CreateQuoteScreen({ navigation, route }: Props) {
   const [showSignaturePad, setShowSignaturePad] = useState(false);
   const [stepLoading, setStepLoading] = useState<string | null>(null);
   const signatureRef = useRef<any>(null);
+  const [paymentType, setPaymentType] = useState<'deposit' | 'full'>('deposit');
+  const depositPercent = paymentType === 'full' ? 100 : 50;
 
   // Vérifier le branding au montage et à chaque retour sur l'écran
   useEffect(() => {
@@ -270,6 +275,8 @@ export default function CreateQuoteScreen({ navigation, route }: Props) {
       tvaAmount,
       amountTTC: totalTTC,
       amountTtc: totalTTC,
+      depositPercentage: depositPercent,
+      deposit_percentage: depositPercent,
       status: 'draft',
       notes,
     };
@@ -338,7 +345,6 @@ export default function CreateQuoteScreen({ navigation, route }: Props) {
       setSavedQuoteData(savedQuote);
 
       // 2. Créer le lien de paiement (SumUp puis Stripe en fallback)
-      const depositPercent = DEPOSIT_PERCENTAGE;
       const depositAmount = total * (depositPercent / 100);
       let link: string | null = null;
 
@@ -455,7 +461,6 @@ export default function CreateQuoteScreen({ navigation, route }: Props) {
     try {
       const quoteRef = savedQuoteData.reference || savedQuoteData.number || '';
       const total = calculateTotal();
-      const depositPercent = DEPOSIT_PERCENTAGE;
       const depositAmount = total * (depositPercent / 100);
 
       // Récupérer la signature email du tenant
@@ -475,12 +480,19 @@ export default function CreateQuoteScreen({ navigation, route }: Props) {
         }
       } catch (_) { /* ignore */ }
 
+      const isFullPayment = paymentType === 'full';
+      const paymentLabel = isFullPayment ? 'la totalité' : `l'acompte de ${depositPercent} %`;
       const paymentSection = paymentLink
-        ? `Vous pouvez effectuer le règlement de cet acompte directement via le lien de paiement sécurisé ci-dessous :\n\n👉 ${paymentLink}`
+        ? `Vous pouvez effectuer le règlement de ${paymentLabel} directement via le lien de paiement sécurisé ci-dessous :\n\n👉 ${paymentLink}`
         : 'Le lien de paiement sera communiqué séparément.';
 
-      const message = `Bonjour ${clientName},\n\nVeuillez trouver en pièce jointe le devis relatif à l'intervention référencée "${quoteRef}".\n\nConformément à nos échanges, un acompte de ${depositPercent} %, soit un montant de ${formatCurrency(depositAmount)}, est demandé afin de valider et planifier l'intervention.\n\n${paymentSection}\n\nDès réception du paiement, l'intervention sera confirmée.\n\nNous restons bien entendu à votre disposition pour toute question ou information complémentaire.\n\nCordialement,${tenantSignature}`;
-      const subject = `Envoi de devis et lien de paiement – Acompte ${depositPercent} %`;
+      const amountLabel = isFullPayment
+        ? `le montant total de ${formatCurrency(depositAmount)}`
+        : `un acompte de ${depositPercent} %, soit un montant de ${formatCurrency(depositAmount)}`;
+      const message = `Bonjour ${clientName},\n\nVeuillez trouver en pièce jointe le devis relatif à l'intervention référencée "${quoteRef}".\n\nConformément à nos échanges, ${amountLabel} est demandé afin de valider et planifier l'intervention.\n\n${paymentSection}\n\nDès réception du paiement, l'intervention sera confirmée.\n\nNous restons bien entendu à votre disposition pour toute question ou information complémentaire.\n\nCordialement,${tenantSignature}`;
+      const subject = isFullPayment
+        ? `Envoi de devis et lien de paiement – Totalité`
+        : `Envoi de devis et lien de paiement – Acompte ${depositPercent} %`;
 
       await api.sendQuoteWithPdf({
         to: clientEmail.trim(),
@@ -494,8 +506,8 @@ export default function CreateQuoteScreen({ navigation, route }: Props) {
         'Devis envoyé !',
         `Le devis${signatureBase64 ? ' signé' : ''} a été envoyé par email à ${clientEmail}.${paymentLink ? '\nLe lien de paiement sécurisé est inclus.' : ''}`,
         [
-          { text: 'Voir mes documents', onPress: () => navigation.navigate('MyDocuments') },
-          { text: 'OK', onPress: () => navigation.goBack() },
+          { text: 'Voir le devis', onPress: () => navigation.replace('QuoteDetail', { quoteId: savedQuoteData?.id }) },
+          { text: 'Mes documents', onPress: () => navigation.navigate('MyDocuments') },
         ]
       );
     } catch (error: any) {
@@ -689,18 +701,35 @@ export default function CreateQuoteScreen({ navigation, route }: Props) {
               <Text style={styles.totalBannerValue}>{formatCurrency(total)}</Text>
             </View>
             <View style={styles.totalBannerDivider} />
-            <View style={styles.totalBannerRow}>
-              <Text style={styles.depositBannerLabel}>Acompte ({DEPOSIT_PERCENTAGE}%)</Text>
-              <Text style={styles.depositBannerValue}>
-                {formatCurrency(total * DEPOSIT_PERCENTAGE / 100)}
-              </Text>
+            {/* Choix type de paiement */}
+            <View style={{ flexDirection: 'row', gap: 8, marginBottom: 8 }}>
+              {PAYMENT_OPTIONS.map(opt => (
+                <TouchableOpacity
+                  key={opt.key}
+                  onPress={() => setPaymentType(opt.key as 'deposit' | 'full')}
+                  style={{
+                    flex: 1, paddingVertical: 10, borderRadius: 8, alignItems: 'center',
+                    backgroundColor: paymentType === opt.key ? '#2563eb' : '#e5e7eb',
+                  }}
+                >
+                  <Text style={{ color: paymentType === opt.key ? '#fff' : '#374151', fontWeight: '700', fontSize: 13 }}>{opt.label}</Text>
+                </TouchableOpacity>
+              ))}
             </View>
             <View style={styles.totalBannerRow}>
-              <Text style={styles.depositBannerLabel}>Solde restant ({100 - DEPOSIT_PERCENTAGE}%)</Text>
+              <Text style={styles.depositBannerLabel}>{paymentType === 'full' ? 'Totalité' : `Acompte (${depositPercent}%)`}</Text>
               <Text style={styles.depositBannerValue}>
-                {formatCurrency(total * (100 - DEPOSIT_PERCENTAGE) / 100)}
+                {formatCurrency(total * depositPercent / 100)}
               </Text>
             </View>
+            {paymentType === 'deposit' && (
+              <View style={styles.totalBannerRow}>
+                <Text style={styles.depositBannerLabel}>Solde restant ({100 - depositPercent}%)</Text>
+                <Text style={styles.depositBannerValue}>
+                  {formatCurrency(total * (100 - depositPercent) / 100)}
+                </Text>
+              </View>
+            )}
           </View>
         )}
       </ScrollView>
@@ -869,7 +898,7 @@ export default function CreateQuoteScreen({ navigation, route }: Props) {
                 .m-signature-pad--body { border: none; }
                 .m-signature-pad--body canvas { background-color: #fafafa; }
                 .m-signature-pad--footer { background-color: #fff; padding: 8px 16px; }
-                .m-signature-pad--footer .button { background-color: #3b82f6; color: #fff; border-radius: 10px; font-size: 16px; font-weight: 700; padding: 12px 24px; }
+                .m-signature-pad--footer .button { background-color: #2563eb; color: #fff; border-radius: 10px; font-size: 16px; font-weight: 700; padding: 12px 24px; }
                 .m-signature-pad--footer .button.clear { background-color: #f1f5f9; color: #64748b; }
                 body,html { width: 100%; height: 100%; margin: 0; padding: 0; }
               `}
@@ -1160,12 +1189,12 @@ const styles = StyleSheet.create({
   depositBannerLabel: {
     fontSize: 14,
     fontWeight: '500',
-    color: '#3b82f6',
+    color: '#2563eb',
   },
   depositBannerValue: {
     fontSize: 16,
     fontWeight: '600',
-    color: '#3b82f6',
+    color: '#2563eb',
   },
   stepsIndicator: {
     flexDirection: 'row',
@@ -1188,7 +1217,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   stepActive: {
-    backgroundColor: '#3b82f6',
+    backgroundColor: '#2563eb',
   },
   stepDone: {
     backgroundColor: '#22c55e',
@@ -1242,7 +1271,7 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     paddingVertical: 14,
     borderRadius: 10,
-    backgroundColor: '#3b82f6',
+    backgroundColor: '#2563eb',
     gap: 8,
   },
   signButton: {
@@ -1332,7 +1361,7 @@ const styles = StyleSheet.create({
     color: '#64748b',
   },
   modalAddButton: {
-    backgroundColor: '#3b82f6',
+    backgroundColor: '#2563eb',
     paddingVertical: 14,
     borderRadius: 8,
     alignItems: 'center',

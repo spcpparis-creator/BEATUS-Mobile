@@ -11,11 +11,16 @@ import {
   Platform,
   Image,
   Alert,
+  Modal,
+  ScrollView,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import * as ImagePicker from 'expo-image-picker';
 import * as SecureStore from 'expo-secure-store';
 import { useAuth } from '../../contexts/AuthContext';
+
+let Audio: any = null;
+try { Audio = require('expo-av').Audio; } catch { /* expo-av pas disponible dans ce build */ }
 import { API_BASE_URL, COLORS } from '../../config/api';
 
 interface Conversation {
@@ -86,7 +91,7 @@ interface Props {
   accentColor?: string;
 }
 
-export default function MessagingScreen({ navigation, route, accentColor = '#3b82f6' }: Props) {
+export default function MessagingScreen({ navigation, route, accentColor = '#2563eb' }: Props) {
   const { user } = useAuth();
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [messages, setMessages] = useState<Message[]>([]);
@@ -98,6 +103,21 @@ export default function MessagingScreen({ navigation, route, accentColor = '#3b8
   const [initDone, setInitDone] = useState(false);
   const flatListRef = useRef<FlatList>(null);
   const pollingRef = useRef<NodeJS.Timeout | null>(null);
+
+  // Audio recording
+  const [isRecording, setIsRecording] = useState(false);
+  const [recordingDuration, setRecordingDuration] = useState(0);
+  const recordingRef = useRef<Audio.Recording | null>(null);
+  const recordingTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  // Audio playback
+  const [playingAudioId, setPlayingAudioId] = useState<string | null>(null);
+  const [audioProgress, setAudioProgress] = useState(0);
+  const [audioDuration, setAudioDuration] = useState(0);
+  const soundRef = useRef<Audio.Sound | null>(null);
+
+  // Emoji picker
+  const [showEmojiPicker, setShowEmojiPicker] = useState(false);
 
   // Si on arrive avec un interventionId, trouver ou créer la conversation
   useEffect(() => {
@@ -297,6 +317,106 @@ export default function MessagingScreen({ navigation, route, accentColor = '#3b8
     }
   };
 
+  const isAudioAvailable = !!Audio;
+
+  // ===== ENREGISTREMENT AUDIO =====
+  const startRecording = async () => {
+    if (!Audio) { Alert.alert('Non disponible', 'Les messages vocaux nécessitent une mise à jour de l\'app.'); return; }
+    try {
+      const perm = await Audio.requestPermissionsAsync();
+      if (!perm.granted) { Alert.alert('Permission refusée', "L'accès au micro est nécessaire"); return; }
+      await Audio.setAudioModeAsync({ allowsRecordingIOS: true, playsInSilentModeIOS: true });
+      const { recording } = await Audio.Recording.createAsync(Audio.RecordingOptionsPresets.HIGH_QUALITY);
+      recordingRef.current = recording;
+      setIsRecording(true);
+      setRecordingDuration(0);
+      recordingTimerRef.current = setInterval(() => setRecordingDuration(d => d + 1), 1000);
+    } catch {
+      Alert.alert('Erreur', "Impossible de démarrer l'enregistrement");
+    }
+  };
+
+  const stopAndSendRecording = async () => {
+    if (!recordingRef.current || !selectedConv) return;
+    if (recordingTimerRef.current) clearInterval(recordingTimerRef.current);
+    setIsRecording(false);
+    setRecordingDuration(0);
+    try {
+      await recordingRef.current.stopAndUnloadAsync();
+      await Audio.setAudioModeAsync({ allowsRecordingIOS: false });
+      const uri = recordingRef.current.getURI();
+      recordingRef.current = null;
+      if (!uri) return;
+
+      setSending(true);
+      const token = await SecureStore.getItemAsync('authToken');
+      const formData = new FormData();
+      formData.append('file', { uri, type: 'audio/m4a', name: `vocal-${Date.now()}.m4a` } as any);
+      formData.append('conversationId', selectedConv);
+
+      const uploadRes = await fetch(`${API_BASE_URL}/messaging/upload`, {
+        method: 'POST',
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+        body: formData,
+      });
+      if (uploadRes.ok) {
+        const data = await uploadRes.json();
+        const headers = await getHeaders();
+        await fetch(`${API_BASE_URL}/messaging/conversations/${selectedConv}/messages`, {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({ content: '', messageType: 'audio', attachments: [{ url: data.url, fileName: data.fileName, fileType: data.fileType }] }),
+        });
+        await loadMessages(selectedConv);
+        await loadConversations();
+      }
+    } catch {
+      Alert.alert('Erreur', "Impossible d'envoyer le message vocal");
+    } finally {
+      setSending(false);
+    }
+  };
+
+  const cancelRecording = async () => {
+    if (recordingTimerRef.current) clearInterval(recordingTimerRef.current);
+    setIsRecording(false);
+    setRecordingDuration(0);
+    if (recordingRef.current) {
+      try { await recordingRef.current.stopAndUnloadAsync(); } catch {}
+      if (Audio) await Audio.setAudioModeAsync({ allowsRecordingIOS: false });
+      recordingRef.current = null;
+    }
+  };
+
+  // ===== LECTURE AUDIO =====
+  const playAudio = async (msgId: string, url: string) => {
+    if (!Audio) { Alert.alert('Non disponible', 'La lecture audio nécessite une mise à jour de l\'app.'); return; }
+    try {
+      if (soundRef.current) { await soundRef.current.unloadAsync(); soundRef.current = null; }
+      if (playingAudioId === msgId) { setPlayingAudioId(null); return; }
+      await Audio.setAudioModeAsync({ allowsRecordingIOS: false, playsInSilentModeIOS: true });
+      const { sound } = await Audio.Sound.createAsync({ uri: url }, { shouldPlay: true }, (status) => {
+        if (status.isLoaded) {
+          setAudioProgress(status.positionMillis || 0);
+          setAudioDuration(status.durationMillis || 0);
+          if (status.didJustFinish) { setPlayingAudioId(null); setAudioProgress(0); }
+        }
+      });
+      soundRef.current = sound;
+      setPlayingAudioId(msgId);
+    } catch {
+      Alert.alert('Erreur', 'Impossible de lire cet audio');
+    }
+  };
+
+  useEffect(() => { return () => { soundRef.current?.unloadAsync(); }; }, []);
+
+  const fmtTime = (s: number) => { const m = Math.floor(s / 60); const sec = s % 60; return `${m}:${sec.toString().padStart(2, '0')}`; };
+  const fmtMs = (ms: number) => fmtTime(Math.floor(ms / 1000));
+
+  // ===== EMOJIS =====
+  const EMOJI_LIST = ['😀','😂','🤣','😊','😍','😘','😎','🤩','😇','🙏','👍','👋','❤️','🔥','✅','👏','💪','🎉','✨','👌','✌️','🤝','👊','🫡','📱','🔧','📞','📋','💰','🏠','⚠️','❗','💡','🔔','⭐','💯'];
+
   const getDisplayName = (conv: Conversation) => {
     if (conv.title) return conv.title;
     const other = conv.participants?.find(p => p.userId !== user?.id);
@@ -495,18 +615,39 @@ export default function MessagingScreen({ navigation, route, accentColor = '#3b8
                       styles.bubble,
                       isMe ? [styles.bubbleMe, { backgroundColor: accentColor }] : styles.bubbleOther,
                     ]}>
-                      {item.message_type === 'image' && item.attachments?.[0] && (
-                        <Image
-                          source={{ uri: item.attachments[0].url }}
-                          style={styles.messageImage}
-                          resizeMode="cover"
-                        />
-                      )}
-                      {item.content ? (
-                        <Text style={[styles.messageText, isMe && styles.messageTextMe]}>
-                          {item.content}
-                        </Text>
-                      ) : null}
+                      {(() => {
+                        const att: any[] = typeof item.attachments === 'string'
+                          ? (() => { try { return JSON.parse(item.attachments); } catch { return []; } })()
+                          : (item.attachments || []);
+                        return (
+                          <>
+                            {item.message_type === 'image' && att[0] && (
+                              <Image source={{ uri: att[0].url }} style={styles.messageImage} resizeMode="cover" />
+                            )}
+                            {item.message_type === 'audio' && att[0] && (
+                              <TouchableOpacity
+                                onPress={() => playAudio(item.id, att[0].url)}
+                                style={{ flexDirection: 'row', alignItems: 'center', gap: 10, minWidth: 160, paddingVertical: 4 }}
+                              >
+                                <View style={{ width: 32, height: 32, borderRadius: 16, backgroundColor: isMe ? 'rgba(255,255,255,0.25)' : '#e5e7eb', justifyContent: 'center', alignItems: 'center' }}>
+                                  <Text style={{ fontSize: 14 }}>{playingAudioId === item.id ? '⏸' : '▶️'}</Text>
+                                </View>
+                                <View style={{ flex: 1 }}>
+                                  <View style={{ height: 4, borderRadius: 2, backgroundColor: isMe ? 'rgba(255,255,255,0.3)' : '#d1d5db', overflow: 'hidden' }}>
+                                    <View style={{ height: '100%', borderRadius: 2, backgroundColor: isMe ? '#fff' : accentColor, width: playingAudioId === item.id && audioDuration > 0 ? `${(audioProgress / audioDuration) * 100}%` : '0%' }} />
+                                  </View>
+                                  <Text style={{ fontSize: 10, marginTop: 2, color: isMe ? 'rgba(255,255,255,0.7)' : '#9ca3af' }}>
+                                    {playingAudioId === item.id ? fmtMs(audioProgress) : '🎤 Vocal'}
+                                  </Text>
+                                </View>
+                              </TouchableOpacity>
+                            )}
+                            {item.content ? (
+                              <Text style={[styles.messageText, isMe && styles.messageTextMe]}>{item.content}</Text>
+                            ) : null}
+                          </>
+                        );
+                      })()}
                     </View>
                     <Text style={[styles.messageTime, isMe && styles.messageTimeRight]}>
                       {formatFullTime(item.created_at)}
@@ -519,31 +660,73 @@ export default function MessagingScreen({ navigation, route, accentColor = '#3b8
         )}
 
         {/* Input */}
-        <View style={styles.inputBar}>
-          <TouchableOpacity onPress={handlePickImage} style={styles.attachButton}>
-            <Text style={{ fontSize: 20 }}>📎</Text>
-          </TouchableOpacity>
-          <TextInput
-            style={styles.textInput}
-            value={messageInput}
-            onChangeText={setMessageInput}
-            placeholder="Écrire un message..."
-            placeholderTextColor="#9ca3af"
-            multiline
-            maxLength={2000}
-          />
-          <TouchableOpacity
-            onPress={handleSend}
-            disabled={!messageInput.trim() || sending}
-            style={[styles.sendButton, { backgroundColor: accentColor, opacity: messageInput.trim() ? 1 : 0.5 }]}
-          >
-            {sending ? (
-              <ActivityIndicator size="small" color="#fff" />
-            ) : (
+        {isRecording ? (
+          <View style={[styles.inputBar, { backgroundColor: '#fef2f2' }]}>
+            <TouchableOpacity onPress={cancelRecording} style={styles.attachButton}>
+              <Text style={{ fontSize: 20 }}>✕</Text>
+            </TouchableOpacity>
+            <View style={{ flex: 1, flexDirection: 'row', alignItems: 'center', gap: 8, paddingHorizontal: 8 }}>
+              <View style={{ width: 8, height: 8, borderRadius: 4, backgroundColor: '#ef4444' }} />
+              <Text style={{ fontSize: 14, fontWeight: '600', color: '#dc2626' }}>{fmtTime(recordingDuration)}</Text>
+              <Text style={{ fontSize: 12, color: '#ef4444' }}>Enregistrement...</Text>
+            </View>
+            <TouchableOpacity
+              onPress={stopAndSendRecording}
+              style={[styles.sendButton, { backgroundColor: '#dc2626' }]}
+            >
               <Text style={styles.sendText}>➤</Text>
+            </TouchableOpacity>
+          </View>
+        ) : (
+          <View style={styles.inputBar}>
+            <TouchableOpacity onPress={handlePickImage} style={styles.attachButton}>
+              <Text style={{ fontSize: 20 }}>📎</Text>
+            </TouchableOpacity>
+            <TouchableOpacity onPress={() => setShowEmojiPicker(!showEmojiPicker)} style={styles.attachButton}>
+              <Text style={{ fontSize: 20 }}>😊</Text>
+            </TouchableOpacity>
+            <TextInput
+              style={styles.textInput}
+              value={messageInput}
+              onChangeText={setMessageInput}
+              placeholder="Écrire un message..."
+              placeholderTextColor="#9ca3af"
+              multiline
+              maxLength={2000}
+            />
+            {messageInput.trim() || !isAudioAvailable ? (
+              <TouchableOpacity
+                onPress={handleSend}
+                disabled={!messageInput.trim() || sending}
+                style={[styles.sendButton, { backgroundColor: accentColor, opacity: messageInput.trim() ? 1 : 0.5 }]}
+              >
+                {sending ? <ActivityIndicator size="small" color="#fff" /> : <Text style={styles.sendText}>➤</Text>}
+              </TouchableOpacity>
+            ) : (
+              <TouchableOpacity
+                onPress={startRecording}
+                style={[styles.sendButton, { backgroundColor: accentColor }]}
+              >
+                <Text style={styles.sendText}>🎙</Text>
+              </TouchableOpacity>
             )}
-          </TouchableOpacity>
-        </View>
+          </View>
+        )}
+
+        {/* Emoji Picker */}
+        {showEmojiPicker && (
+          <View style={{ backgroundColor: '#fff', borderTopWidth: 1, borderTopColor: '#e5e7eb', paddingHorizontal: 10, paddingVertical: 8 }}>
+            <ScrollView horizontal showsHorizontalScrollIndicator={false}>
+              <View style={{ flexDirection: 'row', gap: 4 }}>
+                {EMOJI_LIST.map(emoji => (
+                  <TouchableOpacity key={emoji} onPress={() => { setMessageInput(prev => prev + emoji); setShowEmojiPicker(false); }} style={{ padding: 6 }}>
+                    <Text style={{ fontSize: 24 }}>{emoji}</Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+            </ScrollView>
+          </View>
+        )}
       </KeyboardAvoidingView>
     </SafeAreaView>
   );

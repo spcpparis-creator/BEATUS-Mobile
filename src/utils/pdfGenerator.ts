@@ -47,6 +47,7 @@ interface QuoteOrInvoice {
   amountTTC?: number | string;
   amountHT?: number | string;
   tvaAmount?: number | string;
+  tvaRate?: number | string;
   materialCost?: number | string;
   notes?: string;
   createdAt?: string;
@@ -172,11 +173,13 @@ export async function generatePDFHtml(
   // Convertir le logo en base64 pour l'embarquer dans le PDF
   const logoBase64 = await imageUrlToBase64(logoUrl);
 
-  // Calculer les montants
+  // Calculer les montants avec le vrai taux de TVA
   const amountTTC = toNumber(document.amountTTC);
   const materialCost = toNumber(document.materialCost);
   const totalAmount = amountTTC + materialCost;
-  const totalHT = totalAmount / 1.2;
+  const tvaRate = toNumber(document.tvaRate) || 20;
+  const providedHT = toNumber(document.amountHT);
+  const totalHT = providedHT > 0 ? providedHT : totalAmount / (1 + tvaRate / 100);
   const tva = totalAmount - totalHT;
 
   // Générer les lignes du tableau
@@ -187,11 +190,12 @@ export async function generatePDFHtml(
       const quantity = toNumber(item.quantity) || 1;
       const unitPrice = toNumber(item.unitPrice);
       const total = toNumber(item.total) || (quantity * unitPrice);
+      const qtyDisplay = Number.isInteger(quantity) ? String(quantity) : quantity.toFixed(2);
       const rowBg = idx % 2 === 0 ? '#ffffff' : '#f8fafc';
       tableRows += `
         <tr style="background: ${rowBg};">
           <td class="td-desc">${description}</td>
-          <td class="td-center">${quantity}</td>
+          <td class="td-center">${qtyDisplay}</td>
           <td class="td-right">${formatCurrency(unitPrice)}</td>
           <td class="td-right td-bold">${formatCurrency(total)}</td>
         </tr>
@@ -531,7 +535,7 @@ export async function generatePDFHtml(
         <div class="doc-type">${title}</div>
         <div class="doc-number">N° ${documentNumber}</div>
         <div class="doc-date">${formatDate(document.createdAt)}</div>
-        <div class="status-badge">${statusLabel}</div>
+        ${document.status !== 'draft' ? `<div class="status-badge">${statusLabel}</div>` : ''}
       </div>
     </div>
 
@@ -606,7 +610,7 @@ export async function generatePDFHtml(
           <span class="totals-value">${formatCurrency(totalHT)}</span>
         </div>
         <div class="totals-row">
-          <span class="totals-label">TVA (20%)</span>
+          <span class="totals-label">TVA (${tvaRate}%)</span>
           <span class="totals-value">${formatCurrency(tva)}</span>
         </div>
         <div class="totals-row totals-total">

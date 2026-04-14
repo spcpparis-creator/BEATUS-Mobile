@@ -89,8 +89,13 @@ export default function TechnicianDefaultsScreen({ navigation }: Props) {
 
   const handleSave = async () => {
     const commission = parseInt(defaultCommission);
+    const maxCommission = teamLeader?.commissionFromAdmin ?? teamLeader?.commission_from_admin ?? 100;
     if (isNaN(commission) || commission < 0 || commission > 100) {
       Alert.alert('Erreur', 'La commission doit être entre 0 et 100');
+      return;
+    }
+    if (commission > maxCommission) {
+      Alert.alert('Erreur', `La commission ne peut pas dépasser ${maxCommission}% (votre commission de l'admin).`);
       return;
     }
 
@@ -163,7 +168,7 @@ export default function TechnicianDefaultsScreen({ navigation }: Props) {
             />
             <Text style={styles.commissionPercent}>%</Text>
             <View style={styles.commissionSlider}>
-              {[10, 20, 30, 40, 50].map(val => (
+              {[10, 20, 30, 40, 50].filter(val => val <= (teamLeader?.commissionFromAdmin ?? teamLeader?.commission_from_admin ?? 100)).map(val => (
                 <TouchableOpacity
                   key={val}
                   style={[
@@ -184,7 +189,8 @@ export default function TechnicianDefaultsScreen({ navigation }: Props) {
           </View>
           <View style={styles.infoCard}>
             <Text style={styles.infoText}>
-              ℹ️ Vous pourrez modifier la commission individuellement pour chaque technicien
+              ℹ️ Vous pourrez modifier la commission individuellement pour chaque technicien{'\n'}
+              ⚠️ Maximum : {teamLeader?.commissionFromAdmin ?? teamLeader?.commission_from_admin ?? '—'}% (votre commission admin)
             </Text>
           </View>
         </View>
@@ -414,7 +420,7 @@ const styles = StyleSheet.create({
   },
   infoText: {
     fontSize: 13,
-    color: '#3b82f6',
+    color: '#2563eb',
   },
   sectorsList: {
     gap: 8,

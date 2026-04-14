@@ -13,6 +13,7 @@ import { COLORS, API_BASE_URL } from '../../config/api';
 import * as SecureStore from 'expo-secure-store';
 
 interface Props {
+  route?: { params?: { interventionId?: string } };
   navigation: any;
 }
 
@@ -27,7 +28,8 @@ interface Document {
   createdAt: string;
 }
 
-export default function MyDocumentsScreen({ navigation }: Props) {
+export default function MyDocumentsScreen({ route, navigation }: Props) {
+  const filterInterventionId = route?.params?.interventionId;
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [documents, setDocuments] = useState<Document[]>([]);
@@ -37,13 +39,12 @@ export default function MyDocumentsScreen({ navigation }: Props) {
     try {
       const token = await SecureStore.getItemAsync('authToken');
       
-      // Charger les devis (GET /api/quotes filtre automatiquement par rôle côté backend)
-      const quotesResponse = await fetch(`${API_BASE_URL}/quotes`, {
+      const qs = filterInterventionId ? `?interventionId=${filterInterventionId}` : '';
+      const quotesResponse = await fetch(`${API_BASE_URL}/quotes${qs}`, {
         headers: { 'Authorization': `Bearer ${token}` },
       }).catch(() => ({ ok: false }));
       
-      // Charger les factures (GET /api/invoices filtre automatiquement par rôle côté backend)
-      const invoicesResponse = await fetch(`${API_BASE_URL}/invoices`, {
+      const invoicesResponse = await fetch(`${API_BASE_URL}/invoices${qs}`, {
         headers: { 'Authorization': `Bearer ${token}` },
       }).catch(() => ({ ok: false }));
 

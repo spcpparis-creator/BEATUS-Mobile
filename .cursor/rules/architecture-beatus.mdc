@@ -5,12 +5,13 @@ alwaysApply: true
 
 # Architecture BEATUS
 
-## Deux projets distincts
+## Trois projets distincts
 
 | Projet | Chemin | Rôle | Utilisateurs |
 |--------|--------|------|--------------|
 | **BEATUS** | `/BEATUS` | Admin frontend web (PC) | Admin uniquement |
 | **BEATUS-Mobile** | `/BEATUS-Mobile` | App iOS (App Store) | Team leaders + Techniciens |
+| **BEATUS-Client-Mobile** | `/BEATUS-Client-Mobile` | App iOS (App Store) | Clients uniquement |
 
 ## Communication
 
@@ -37,4 +38,5 @@ Les deux projets sont **séparés** mais communiquent via le **même backend** :
 
 - **BEATUS** = admin web (PC)
 - **BEATUS-Mobile** = app iOS (TL + techniciens)
-- Toujours distinguer les deux lors des builds, déploiements et réponses
+- **BEATUS-Client-Mobile** = app iOS (clients)
+- Toujours distinguer les trois lors des builds, déploiements et réponses

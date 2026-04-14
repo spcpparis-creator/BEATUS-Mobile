@@ -7,6 +7,8 @@ import {
   TouchableOpacity,
   ActivityIndicator,
   RefreshControl,
+  TextInput,
+  Alert,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useAuth } from '../../contexts/AuthContext';
@@ -74,13 +76,36 @@ export default function TechnicianSettingsScreen({ navigation }: any) {
     loadData();
   };
 
+  const [editingName, setEditingName] = useState(false);
+  const [newName, setNewName] = useState('');
+  const [savingName, setSavingName] = useState(false);
+
+  const currentName = technicianProfile?.name || user?.name || '';
   const commission = technicianProfile?.commissionPercentage ?? technicianProfile?.commission_percentage ?? 30;
   const sectors = technicianProfile?.selectedDepartments ?? technicianProfile?.selected_departments ?? [];
-  // Utiliser activityIds si non-vide, sinon fallback sur specialties (peut contenir des noms au lieu d'IDs)
   const rawActivityIds = technicianProfile?.activityIds ?? technicianProfile?.activity_ids ?? [];
   const activityIds = (Array.isArray(rawActivityIds) && rawActivityIds.length > 0)
     ? rawActivityIds
     : (technicianProfile?.specialties ?? []);
+
+  const handleSaveName = async () => {
+    const trimmed = newName.trim();
+    if (!trimmed || trimmed === currentName) {
+      setEditingName(false);
+      return;
+    }
+    setSavingName(true);
+    try {
+      await api.updateMyProfile({ name: trimmed });
+      setTechnicianProfile((prev: any) => prev ? { ...prev, name: trimmed } : prev);
+      setEditingName(false);
+      Alert.alert('Succès', 'Votre nom a été mis à jour.');
+    } catch {
+      Alert.alert('Erreur', 'Impossible de mettre à jour le nom.');
+    } finally {
+      setSavingName(false);
+    }
+  };
 
   if (loading) {
     return (
@@ -114,6 +139,49 @@ export default function TechnicianSettingsScreen({ navigation }: any) {
           <Text style={styles.invitationConfigSubtitle}>
             Valeurs saisies lors de la génération du code d'invitation (par l'admin ou le chef d'équipe)
           </Text>
+        </View>
+
+        {/* Nom affiché */}
+        <View style={styles.settingsCard}>
+          <Text style={styles.settingsLabel}>👤 Nom affiché</Text>
+          {editingName ? (
+            <View>
+              <TextInput
+                style={{ borderWidth: 1, borderColor: '#d1d5db', borderRadius: 10, paddingHorizontal: 14, paddingVertical: 10, fontSize: 16, color: '#111827', backgroundColor: '#f9fafb' }}
+                value={newName}
+                onChangeText={setNewName}
+                placeholder="Votre nom"
+                autoFocus
+              />
+              <View style={{ flexDirection: 'row', gap: 10, marginTop: 12 }}>
+                <TouchableOpacity
+                  onPress={() => setEditingName(false)}
+                  style={{ flex: 1, paddingVertical: 10, borderRadius: 10, backgroundColor: '#f3f4f6', alignItems: 'center' }}
+                >
+                  <Text style={{ fontSize: 14, fontWeight: '600', color: '#6b7280' }}>Annuler</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  onPress={handleSaveName}
+                  disabled={savingName}
+                  style={{ flex: 1, paddingVertical: 10, borderRadius: 10, backgroundColor: COLORS.primary, alignItems: 'center' }}
+                >
+                  {savingName ? (
+                    <ActivityIndicator size="small" color="#fff" />
+                  ) : (
+                    <Text style={{ fontSize: 14, fontWeight: '600', color: '#fff' }}>Enregistrer</Text>
+                  )}
+                </TouchableOpacity>
+              </View>
+            </View>
+          ) : (
+            <TouchableOpacity
+              onPress={() => { setNewName(currentName); setEditingName(true); }}
+              style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', backgroundColor: '#f9fafb', padding: 14, borderRadius: 10, borderWidth: 1, borderColor: '#e5e7eb' }}
+            >
+              <Text style={{ fontSize: 16, color: '#111827', fontWeight: '500' }}>{currentName || 'Non défini'}</Text>
+              <Text style={{ fontSize: 13, color: COLORS.primary, fontWeight: '600' }}>Modifier ✏️</Text>
+            </TouchableOpacity>
+          )}
         </View>
 
         {/* Commission */}

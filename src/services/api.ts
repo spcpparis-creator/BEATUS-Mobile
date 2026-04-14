@@ -87,6 +87,13 @@ class ApiService {
     });
   }
 
+  async declineIntervention(id: string, reason?: string) {
+    return this.request<any>(`/interventions/${id}/decline`, {
+      method: 'POST',
+      body: JSON.stringify(reason ? { reason } : {}),
+    });
+  }
+
   async cancelIntervention(id: string, reason?: string) {
     return this.request<any>(`/interventions/${id}/cancel`, {
       method: 'POST',
@@ -105,6 +112,13 @@ class ApiService {
     return this.request<any>(`/interventions/${id}/status`, {
       method: 'PATCH',
       body: JSON.stringify({ status }),
+    });
+  }
+
+  async assignInterventionToTech(interventionId: string, technicianId: string) {
+    return this.request<any>(`/interventions/${interventionId}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ technicianId, status: 'pending' }),
     });
   }
 
@@ -132,6 +146,13 @@ class ApiService {
 
   async updateTechnician(id: string, data: any) {
     return this.request<any>(`/technicians/${id}`, {
+      method: 'PATCH',
+      body: JSON.stringify(data),
+    });
+  }
+
+  async updateMyProfile(data: { name?: string; phone?: string }) {
+    return this.request<any>('/technicians/profile', {
       method: 'PATCH',
       body: JSON.stringify(data),
     });
@@ -177,6 +198,13 @@ class ApiService {
 
   async updateTeamLeader(id: string, data: any) {
     return this.request<any>(`/team-leaders/${id}`, {
+      method: 'PATCH',
+      body: JSON.stringify(data),
+    });
+  }
+
+  async updateMyTLProfile(data: { name?: string; phone?: string }) {
+    return this.request<any>('/team-leaders/me', {
       method: 'PATCH',
       body: JSON.stringify(data),
     });

@@ -33,7 +33,7 @@ export type RootStackParamList = {
   ProfileCompletion: undefined;
   TechnicianHome: undefined;
   TechnicianSettings: undefined;
-  InterventionDetail: { interventionId: string };
+  InterventionDetail: { interventionId: string; openCompletionForm?: boolean };
   TeamLeaderHome: undefined;
   InviteTechnician: undefined;
   DocumentSettings: undefined;
@@ -44,7 +44,7 @@ export type RootStackParamList = {
   CreateInvoice: { interventionId?: string; intervention?: any; quoteId?: string };
   QuoteDetail: { quoteId: string };
   InvoiceDetail: { invoiceId: string };
-  MyDocuments: undefined;
+  MyDocuments: { interventionId?: string } | undefined;
   BillingSettings: undefined;
   SumUpSettings: undefined;
   Messaging: { conversationId?: string; interventionId?: string; interventionRef?: string } | undefined;
@@ -66,8 +66,19 @@ export default function AppNavigator() {
   // Écouter le tap sur une notification → navigation vers l'intervention
   useEffect(() => {
     const handleNotificationResponse = (response: Notifications.NotificationResponse) => {
-      const data = response.notification.request.content.data as { interventionId?: string };
-      if (data?.interventionId && navigationRef.isReady()) {
+      const data = response.notification.request.content.data as {
+        interventionId?: string;
+        conversationId?: string;
+        type?: string;
+        docType?: string;
+        reference?: string;
+      };
+      if (!navigationRef.isReady()) return;
+      if (data?.type === 'payment_received') {
+        navigationRef.navigate('MyDocuments');
+      } else if (data?.type === 'message' && data?.conversationId) {
+        navigationRef.navigate('Messaging', { conversationId: data.conversationId });
+      } else if (data?.interventionId) {
         navigationRef.navigate('InterventionDetail', { interventionId: data.interventionId });
       }
     };
@@ -222,7 +233,7 @@ export default function AppNavigator() {
               <Stack.Screen name="QuoteDetail" component={QuoteDetailScreen} />
               <Stack.Screen name="InvoiceDetail" component={InvoiceDetailScreen} />
               <Stack.Screen name="Messaging">
-                {(props) => <MessagingScreen {...props} accentColor="#7c3aed" />}
+                {(props) => <MessagingScreen {...props} accentColor="#2563eb" />}
               </Stack.Screen>
             </>
           ) : (
@@ -238,7 +249,7 @@ export default function AppNavigator() {
               <Stack.Screen name="QuoteDetail" component={QuoteDetailScreen} />
               <Stack.Screen name="InvoiceDetail" component={InvoiceDetailScreen} />
               <Stack.Screen name="Messaging">
-                {(props) => <MessagingScreen {...props} accentColor="#3b82f6" />}
+                {(props) => <MessagingScreen {...props} accentColor="#2563eb" />}
               </Stack.Screen>
             </>
           )

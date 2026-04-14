@@ -57,11 +57,13 @@ interface InvitationData {
 
 export default function WelcomeScreen() {
   const { loginWithGoogle, loginWithGoogleAndInvitation, login } = useAuth();
-  const [mode, setMode] = useState<'choice' | 'login' | 'invitation' | 'forgot_password'>('choice');
+  const [mode, setMode] = useState<'choice' | 'login' | 'email_login' | 'invitation' | 'forgot_password'>('choice');
   const [invitationCode, setInvitationCode] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [isValidating, setIsValidating] = useState(false);
   const [validatedInvitation, setValidatedInvitation] = useState<InvitationData | null>(null);
+  const [emailInput, setEmailInput] = useState('');
+  const [passwordInput, setPasswordInput] = useState('');
 
   // Écouter les deep links pour le retour OAuth (connexion directe au dashboard)
   useEffect(() => {
@@ -122,6 +124,36 @@ export default function WelcomeScreen() {
       appStateSub.remove();
     };
   }, [login]);
+
+  const handleEmailLogin = async () => {
+    if (!emailInput.trim() || !passwordInput.trim()) {
+      Alert.alert('Erreur', 'Veuillez remplir tous les champs');
+      return;
+    }
+    setIsLoading(true);
+    try {
+      const response = await fetch(`${API_BASE_URL}/auth/login`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: emailInput.trim(), password: passwordInput }),
+      });
+      const data = await response.json();
+      if (!response.ok) {
+        Alert.alert('Erreur', data.error || 'Identifiants incorrects');
+        return;
+      }
+      if (data.user?.role !== 'technician' && data.user?.role !== 'team_leader') {
+        Alert.alert('Accès refusé', "Cette application est réservée aux techniciens et chefs d'équipe.");
+        return;
+      }
+      await login(data.token, data.user);
+    } catch (error: any) {
+      console.error('Erreur login email:', error);
+      Alert.alert('Erreur de connexion', 'Vérifiez votre connexion internet et réessayez.');
+    } finally {
+      setIsLoading(false);
+    }
+  };
 
   const handleGooglePress = async () => {
     setIsLoading(true);
@@ -323,6 +355,20 @@ export default function WelcomeScreen() {
         </TouchableOpacity>
       )}
 
+      <View style={styles.dividerContainer}>
+        <View style={styles.dividerLine} />
+        <Text style={styles.dividerText}>ou</Text>
+        <View style={styles.dividerLine} />
+      </View>
+
+      <TouchableOpacity
+        style={styles.emailLoginButton}
+        onPress={() => setMode('email_login')}
+      >
+        <Text style={styles.emailLoginIcon}>✉️</Text>
+        <Text style={styles.emailLoginButtonText}>Connexion par email</Text>
+      </TouchableOpacity>
+
       <TouchableOpacity
         style={styles.forgotPasswordButton}
         onPress={() => setMode('forgot_password')}
@@ -428,6 +474,63 @@ export default function WelcomeScreen() {
     </KeyboardAvoidingView>
   );
 
+  const renderEmailLoginMode = () => (
+    <KeyboardAvoidingView
+      behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+      style={styles.content}
+    >
+      <TouchableOpacity style={styles.backButton} onPress={() => setMode('login')}>
+        <Text style={styles.backButtonText}>← Retour</Text>
+      </TouchableOpacity>
+
+      <Text style={styles.welcomeText}>Connexion email</Text>
+      <Text style={styles.instructionText}>
+        Entrez vos identifiants
+      </Text>
+
+      <TextInput
+        style={styles.textInputField}
+        value={emailInput}
+        onChangeText={setEmailInput}
+        placeholder="Email"
+        placeholderTextColor="#94a3b8"
+        keyboardType="email-address"
+        autoCapitalize="none"
+        autoCorrect={false}
+        autoComplete="email"
+      />
+
+      <TextInput
+        style={styles.textInputField}
+        value={passwordInput}
+        onChangeText={setPasswordInput}
+        placeholder="Mot de passe"
+        placeholderTextColor="#94a3b8"
+        secureTextEntry
+        autoComplete="password"
+      />
+
+      <TouchableOpacity
+        style={[styles.emailSubmitButton, isLoading && styles.buttonDisabled]}
+        onPress={handleEmailLogin}
+        disabled={isLoading}
+      >
+        {isLoading ? (
+          <ActivityIndicator color="#fff" size="small" />
+        ) : (
+          <Text style={styles.emailSubmitButtonText}>Se connecter</Text>
+        )}
+      </TouchableOpacity>
+
+      <TouchableOpacity
+        style={styles.forgotPasswordButton}
+        onPress={() => setMode('forgot_password')}
+      >
+        <Text style={styles.forgotPasswordText}>Mot de passe oublié ?</Text>
+      </TouchableOpacity>
+    </KeyboardAvoidingView>
+  );
+
   if (mode === 'forgot_password') {
     return <ForgotPasswordScreen onBack={() => setMode('login')} />;
   }
@@ -441,6 +544,7 @@ export default function WelcomeScreen() {
 
       {mode === 'choice' && renderChoiceMode()}
       {mode === 'login' && renderLoginMode()}
+      {mode === 'email_login' && renderEmailLoginMode()}
       {mode === 'invitation' && renderInvitationMode()}
 
       <View style={styles.footer}>
@@ -675,6 +779,66 @@ const styles = StyleSheet.create({
   invitationInfoText: {
     fontSize: 14,
     color: COLORS.textMuted,
+  },
+  dividerContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginVertical: 20,
+  },
+  dividerLine: {
+    flex: 1,
+    height: 1,
+    backgroundColor: COLORS.border,
+  },
+  dividerText: {
+    marginHorizontal: 12,
+    fontSize: 14,
+    color: COLORS.textMuted,
+  },
+  emailLoginButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: COLORS.card,
+    paddingVertical: 16,
+    paddingHorizontal: 24,
+    borderRadius: 16,
+    borderWidth: 2,
+    borderColor: COLORS.border,
+  },
+  emailLoginIcon: {
+    fontSize: 18,
+    marginRight: 10,
+  },
+  emailLoginButtonText: {
+    color: COLORS.text,
+    fontSize: 16,
+    fontWeight: '600',
+  },
+  textInputField: {
+    backgroundColor: COLORS.card,
+    borderWidth: 2,
+    borderColor: COLORS.border,
+    borderRadius: 12,
+    paddingVertical: 16,
+    paddingHorizontal: 20,
+    fontSize: 16,
+    color: COLORS.text,
+    marginBottom: 12,
+  },
+  emailSubmitButton: {
+    backgroundColor: COLORS.primary,
+    paddingVertical: 16,
+    paddingHorizontal: 24,
+    borderRadius: 16,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginTop: 8,
+  },
+  emailSubmitButtonText: {
+    color: '#fff',
+    fontSize: 16,
+    fontWeight: '600',
   },
   forgotPasswordButton: {
     marginTop: 24,

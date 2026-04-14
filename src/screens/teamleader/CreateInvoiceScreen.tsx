@@ -31,7 +31,7 @@ interface LineItem {
   unitPrice: string;
 }
 
-const DEPOSIT_PERCENTAGE = 50;
+const DEFAULT_DEPOSIT_PERCENTAGE = 50;
 
 const STATUS_OPTIONS = [
   { value: 'draft', label: 'Brouillon' },
@@ -76,6 +76,7 @@ export default function CreateInvoiceScreen({ navigation, route }: Props) {
 
   // Devis lié (pour acompte)
   const [linkedQuote, setLinkedQuote] = useState<any>(null);
+  const quoteDepositPercent = linkedQuote?.depositPercentage || linkedQuote?.deposit_percentage || DEFAULT_DEPOSIT_PERCENTAGE;
 
   // Branding du TL
   const billingSettingsRef = useRef<any>(null);
@@ -393,7 +394,7 @@ export default function CreateInvoiceScreen({ navigation, route }: Props) {
       // 2. Calculer le solde restant et créer le lien de paiement
       let depositPaid = 0;
       if (linkedQuote) {
-        depositPaid = linkedQuote.depositAmount || parseFloat((total * DEPOSIT_PERCENTAGE / 100).toFixed(2));
+        depositPaid = linkedQuote.depositAmount || parseFloat((total * quoteDepositPercent / 100).toFixed(2));
         if (linkedQuote.depositPaid === false) depositPaid = 0;
       }
       const balanceAmount = parseFloat((total - depositPaid).toFixed(2));
@@ -522,7 +523,7 @@ export default function CreateInvoiceScreen({ navigation, route }: Props) {
       // Calculer acompte et solde
       let depositPaid = 0;
       if (linkedQuote) {
-        depositPaid = linkedQuote.depositAmount || parseFloat((total * DEPOSIT_PERCENTAGE / 100).toFixed(2));
+        depositPaid = linkedQuote.depositAmount || parseFloat((total * quoteDepositPercent / 100).toFixed(2));
         if (linkedQuote.depositPaid === false) depositPaid = 0;
       }
       const balanceAmount = parseFloat((total - depositPaid).toFixed(2));
@@ -543,10 +544,12 @@ export default function CreateInvoiceScreen({ navigation, route }: Props) {
         }
       } catch (_) { /* ignore */ }
 
-      // Construire la section montants avec détail acompte/solde si devis lié
       let amountSection = '';
       if (linkedQuote && depositPaid > 0) {
-        amountSection = `Montant total TTC : ${formatCurrency(total)}\nAcompte déjà versé (${DEPOSIT_PERCENTAGE}%) : ${formatCurrency(depositPaid)}\nSolde restant dû : ${formatCurrency(balanceAmount)}`;
+        const isFullQuote = quoteDepositPercent >= 100;
+        amountSection = isFullQuote
+          ? `Montant total TTC : ${formatCurrency(total)}\nDéjà réglé intégralement sur devis.`
+          : `Montant total TTC : ${formatCurrency(total)}\nAcompte déjà versé (${quoteDepositPercent}%) : ${formatCurrency(depositPaid)}\nSolde restant dû : ${formatCurrency(balanceAmount)}`;
       } else {
         amountSection = `Montant total TTC : ${formatCurrency(total)}`;
       }
@@ -572,8 +575,8 @@ export default function CreateInvoiceScreen({ navigation, route }: Props) {
         'Facture envoyée !',
         `La facture${signatureBase64 ? ' signée' : ''} a été envoyée par email à ${clientEmail}.${paymentLink ? '\nLe lien de paiement est inclus.' : ''}`,
         [
-          { text: 'Voir mes documents', onPress: () => navigation.navigate('MyDocuments') },
-          { text: 'OK', onPress: () => navigation.goBack() },
+          { text: 'Voir la facture', onPress: () => navigation.replace('InvoiceDetail', { invoiceId: savedInvoiceData?.id }) },
+          { text: 'Mes documents', onPress: () => navigation.navigate('MyDocuments') },
         ]
       );
     } catch (error: any) {
@@ -614,7 +617,7 @@ export default function CreateInvoiceScreen({ navigation, route }: Props) {
             </Text>
           )}
           {linkedQuote?.reference && (
-            <Text style={[styles.subtitle, { color: '#3b82f6' }]}>
+            <Text style={[styles.subtitle, { color: '#2563eb' }]}>
               Devis {linkedQuote.reference}
             </Text>
           )}
@@ -802,16 +805,22 @@ export default function CreateInvoiceScreen({ navigation, route }: Props) {
             <View style={styles.totalBannerDivider} />
             {(quoteId || linkedQuote) ? (
               <>
-                <View style={styles.totalBannerRow}>
-                  <Text style={styles.depositBannerLabel}>Acompte déjà versé</Text>
-                  <Text style={[styles.depositBannerValue, { color: '#059669' }]}>
-                    - {formatCurrency(linkedQuote?.depositAmount || total * DEPOSIT_PERCENTAGE / 100)}
-                  </Text>
-                </View>
+                {quoteDepositPercent < 100 && (
+                  <View style={styles.totalBannerRow}>
+                    <Text style={styles.depositBannerLabel}>Acompte déjà versé ({quoteDepositPercent}%)</Text>
+                    <Text style={[styles.depositBannerValue, { color: '#059669' }]}>
+                      - {formatCurrency(linkedQuote?.depositAmount || total * quoteDepositPercent / 100)}
+                    </Text>
+                  </View>
+                )}
                 <View style={[styles.totalBannerRow, { marginTop: 4 }]}>
-                  <Text style={[styles.depositBannerLabel, { fontWeight: '700' }]}>Solde à payer</Text>
+                  <Text style={[styles.depositBannerLabel, { fontWeight: '700' }]}>
+                    {quoteDepositPercent >= 100 ? 'Déjà réglé intégralement' : 'Solde à payer'}
+                  </Text>
                   <Text style={[styles.depositBannerValue, { fontWeight: '700', fontSize: 18 }]}>
-                    {formatCurrency(total - (linkedQuote?.depositAmount || total * DEPOSIT_PERCENTAGE / 100))}
+                    {quoteDepositPercent >= 100
+                      ? formatCurrency(0)
+                      : formatCurrency(total - (linkedQuote?.depositAmount || total * quoteDepositPercent / 100))}
                   </Text>
                 </View>
                 {linkedQuote?.reference && (
@@ -822,22 +831,7 @@ export default function CreateInvoiceScreen({ navigation, route }: Props) {
                   </View>
                 )}
               </>
-            ) : (
-              <>
-                <View style={styles.totalBannerRow}>
-                  <Text style={styles.depositBannerLabel}>Acompte ({DEPOSIT_PERCENTAGE}%)</Text>
-                  <Text style={styles.depositBannerValue}>
-                    {formatCurrency(total * DEPOSIT_PERCENTAGE / 100)}
-                  </Text>
-                </View>
-                <View style={styles.totalBannerRow}>
-                  <Text style={styles.depositBannerLabel}>Solde ({100 - DEPOSIT_PERCENTAGE}%)</Text>
-                  <Text style={styles.depositBannerValue}>
-                    {formatCurrency(total * (100 - DEPOSIT_PERCENTAGE) / 100)}
-                  </Text>
-                </View>
-              </>
-            )}
+            ) : null}
           </View>
         )}
       </ScrollView>
@@ -947,7 +941,7 @@ export default function CreateInvoiceScreen({ navigation, route }: Props) {
                 .m-signature-pad--body { border: none; }
                 .m-signature-pad--body canvas { background-color: #fafafa; }
                 .m-signature-pad--footer { background-color: #fff; padding: 8px 16px; }
-                .m-signature-pad--footer .button { background-color: #3b82f6; color: #fff; border-radius: 10px; font-size: 16px; font-weight: 700; padding: 12px 24px; }
+                .m-signature-pad--footer .button { background-color: #2563eb; color: #fff; border-radius: 10px; font-size: 16px; font-weight: 700; padding: 12px 24px; }
                 .m-signature-pad--footer .button.clear { background-color: #f1f5f9; color: #64748b; }
                 body,html { width: 100%; height: 100%; margin: 0; padding: 0; }
               `}
@@ -1332,7 +1326,7 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     alignItems: 'center',
   },
-  stepActive: { backgroundColor: '#3b82f6' },
+  stepActive: { backgroundColor: '#2563eb' },
   stepDone: { backgroundColor: '#22c55e' },
   stepInactive: { backgroundColor: '#e2e8f0' },
   stepCircleText: { fontSize: 13, fontWeight: '700', color: '#fff' },
@@ -1361,7 +1355,7 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     paddingVertical: 14,
     borderRadius: 10,
-    backgroundColor: '#3b82f6',
+    backgroundColor: '#2563eb',
     gap: 8,
   },
   signButton: {

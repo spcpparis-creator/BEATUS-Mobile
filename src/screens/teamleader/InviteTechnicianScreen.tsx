@@ -102,6 +102,13 @@ export default function InviteTechnicianScreen({ navigation }: Props) {
   };
 
   const generateCode = async () => {
+    // Vérifier que la commission ne dépasse pas celle du TL
+    const tlMaxCommission = teamLeader?.commissionFromAdmin ?? teamLeader?.commission_from_admin ?? 100;
+    if (commissionPercentage > tlMaxCommission) {
+      Alert.alert('Erreur', `La commission ne peut pas dépasser ${tlMaxCommission}% (votre commission de l'admin).`);
+      return;
+    }
+
     setLoading(true);
     try {
       const token = await SecureStore.getItemAsync('authToken');
@@ -177,8 +184,9 @@ export default function InviteTechnicianScreen({ navigation }: Props) {
   const tlDepartments = teamLeader?.selectedDepartments || [];
   const tlActivities = teamLeader?.activityIds || [];
   
-  // Presets de commission
-  const commissionPresets = [10, 15, 20, 25, 30, 35, 40, 50];
+  // Presets de commission (plafonnés à la commission du TL)
+  const maxCommission = teamLeader?.commissionFromAdmin ?? teamLeader?.commission_from_admin ?? 100;
+  const commissionPresets = [10, 15, 20, 25, 30, 35, 40, 50].filter(v => v <= maxCommission);
 
   if (loadingProfile) {
     return (

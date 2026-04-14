@@ -2,7 +2,7 @@
   "expo": {
     "name": "BEATUS Mobile",
     "slug": "beatus-mobile",
-    "version": "1.0.0",
+    "version": "1.2.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",
@@ -12,15 +12,32 @@
       "backgroundColor": "#ffffff"
     },
     "scheme": "beatus",
-    "plugins": ["expo-notifications", "expo-apple-authentication"],
+    "plugins": [
+      "expo-notifications",
+      "expo-apple-authentication",
+      [
+        "expo-location",
+        {
+          "locationAlwaysAndWhenInUsePermission": "BEATUS utilise votre position pour le suivi en temps réel des interventions, même en arrière-plan.",
+          "locationAlwaysPermission": "BEATUS utilise votre position pour le suivi en temps réel des interventions, même en arrière-plan.",
+          "locationWhenInUsePermission": "BEATUS utilise votre position pour localiser les interventions sur la carte.",
+          "isIosBackgroundLocationEnabled": true,
+          "isAndroidBackgroundLocationEnabled": true
+        }
+      ]
+    ],
     "ios": {
       "supportsTablet": true,
       "bundleIdentifier": "com.beatus.mobile",
       "usesAppleSignIn": true,
       "infoPlist": {
         "NSLocationWhenInUseUsageDescription": "BEATUS utilise votre position pour localiser les interventions sur la carte.",
+        "NSLocationAlwaysAndWhenInUseUsageDescription": "BEATUS utilise votre position pour le suivi en temps réel des interventions, même en arrière-plan.",
+        "NSLocationAlwaysUsageDescription": "BEATUS utilise votre position pour le suivi en temps réel, même quand l'app est fermée.",
         "NSPhotoLibraryUsageDescription": "BEATUS accède à vos photos pour ajouter des logos et documents.",
-        "ITSAppUsesNonExemptEncryption": false
+        "NSMicrophoneUsageDescription": "BEATUS utilise le microphone pour envoyer des messages vocaux.",
+        "ITSAppUsesNonExemptEncryption": false,
+        "UIBackgroundModes": ["remote-notification", "location"]
       }
     },
     "android": {
@@ -29,7 +46,7 @@
         "foregroundImage": "./assets/icon.png",
         "backgroundColor": "#ffffff"
       },
-      "permissions": ["RECEIVE_BOOT_COMPLETED", "VIBRATE"],
+      "permissions": ["RECEIVE_BOOT_COMPLETED", "VIBRATE", "ACCESS_BACKGROUND_LOCATION", "ACCESS_FINE_LOCATION", "FOREGROUND_SERVICE"],
       "notification": {
         "color": "#3b82f6"
       }
