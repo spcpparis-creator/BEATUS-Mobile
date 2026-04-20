@@ -267,6 +267,7 @@ export default function InterventionDetailScreen({ route, navigation }: Props) {
   const canStartRoute = status === 'accepted';
   const canArriveOnSite = status === 'en_route';
   const canComplete = ['on_site', 'in_progress'].includes(status);
+  const canLeaveQuote = ['on_site', 'in_progress'].includes(status);
   
   // Déterminer l'étape actuelle pour la barre de progression
   const getProgressStep = () => {
@@ -769,6 +770,35 @@ export default function InterventionDetailScreen({ route, navigation }: Props) {
                 onPress={() => setShowCompletionForm(true)}
               >
                 <Text style={styles.actionButtonText}>✓ Terminer l'intervention</Text>
+              </TouchableOpacity>
+            )}
+
+            {canLeaveQuote && (
+              <TouchableOpacity
+                style={[styles.actionButton, { backgroundColor: '#d97706' }]}
+                onPress={() => {
+                  Alert.alert(
+                    'Devis laissé',
+                    'Confirmer que vous avez laissé un devis au client ? L\'intervention sera mise en attente de validation.',
+                    [
+                      { text: 'Annuler', style: 'cancel' },
+                      {
+                        text: 'Confirmer',
+                        onPress: async () => {
+                          try {
+                            await api.updateInterventionStatus(interventionId, 'quote_left');
+                            Alert.alert('Succès', 'Devis laissé enregistré');
+                            navigation.goBack();
+                          } catch (error) {
+                            Alert.alert('Erreur', 'Impossible de mettre à jour le statut');
+                          }
+                        },
+                      },
+                    ]
+                  );
+                }}
+              >
+                <Text style={styles.actionButtonText}>📋 Devis laissé</Text>
               </TouchableOpacity>
             )}
 

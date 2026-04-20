@@ -2,7 +2,7 @@
   "expo": {
     "name": "BEATUS Mobile",
     "slug": "beatus-mobile",
-    "version": "1.2.0",
+    "version": "1.2.1",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",
@@ -37,8 +37,12 @@
         "NSPhotoLibraryUsageDescription": "BEATUS accède à vos photos pour ajouter des logos et documents.",
         "NSMicrophoneUsageDescription": "BEATUS utilise le microphone pour envoyer des messages vocaux.",
         "ITSAppUsesNonExemptEncryption": false,
-        "UIBackgroundModes": ["remote-notification", "location"]
-      }
+        "UIBackgroundModes": [
+          "remote-notification",
+          "location"
+        ]
+      },
+      "buildNumber": "2"
     },
     "android": {
       "package": "com.beatus.mobile",
@@ -46,7 +50,13 @@
         "foregroundImage": "./assets/icon.png",
         "backgroundColor": "#ffffff"
       },
-      "permissions": ["RECEIVE_BOOT_COMPLETED", "VIBRATE", "ACCESS_BACKGROUND_LOCATION", "ACCESS_FINE_LOCATION", "FOREGROUND_SERVICE"],
+      "permissions": [
+        "RECEIVE_BOOT_COMPLETED",
+        "VIBRATE",
+        "ACCESS_BACKGROUND_LOCATION",
+        "ACCESS_FINE_LOCATION",
+        "FOREGROUND_SERVICE"
+      ],
       "notification": {
         "color": "#3b82f6"
       }

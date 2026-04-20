@@ -1022,11 +1022,38 @@ export default function TeamLeaderHomeScreen({ navigation }: any) {
                         }}
                       >
                         <Text style={styles.continueButtonText}>
-                          {intervention.status === 'accepted' ? '🚗 Démarrer le trajet' : 
+                          {intervention.status === 'accepted' ? '🚗 Démarrer le trajet' :
                            intervention.status === 'en_route' ? '📍 Je suis arrivé' :
                            '✓ Terminer l\'intervention'}
                         </Text>
                       </TouchableOpacity>
+                      {['on_site', 'in_progress'].includes(intervention.status) && (
+                        <TouchableOpacity
+                          style={[styles.continueButton, { backgroundColor: '#d97706', marginTop: 6 }]}
+                          onPress={() => {
+                            Alert.alert(
+                              'Devis laissé',
+                              'Confirmer que vous avez laissé un devis au client ?',
+                              [
+                                { text: 'Annuler', style: 'cancel' },
+                                {
+                                  text: 'Confirmer',
+                                  onPress: async () => {
+                                    try {
+                                      await api.updateInterventionStatus(intervention.id, 'quote_left');
+                                      await loadData();
+                                    } catch (e: any) {
+                                      Alert.alert('Erreur', e.message || 'Impossible de mettre à jour le statut');
+                                    }
+                                  },
+                                },
+                              ]
+                            );
+                          }}
+                        >
+                          <Text style={styles.continueButtonText}>📋 Devis laissé</Text>
+                        </TouchableOpacity>
+                      )}
                     </View>
                   );
                 })}
